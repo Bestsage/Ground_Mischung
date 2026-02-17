@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🚀 Rocket Telemetry Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <h1>🚀 GCS</h1>
+                <span class="version">v1.0</span>
+            </div>
+            <ul class="nav-menu">
+                <li class="nav-item active" data-page="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span class="nav-text">Dashboard</span>
+                </li>
+                <li class="nav-item" data-page="map">
+                    <span class="nav-icon">🗺️</span>
+                    <span class="nav-text">GPS Map</span>
+                </li>
+                <li class="nav-item" data-page="charts">
+                    <span class="nav-icon">📈</span>
+                    <span class="nav-text">Charts</span>
+                </li>
+                <li class="nav-item" data-page="3d">
+                    <span class="nav-icon">🎮</span>
+                    <span class="nav-text">3D View</span>
+                </li>
+                <li class="nav-item" data-page="logs">
+                    <span class="nav-icon">📝</span>
+                    <span class="nav-text">Logs</span>
+                </li>
+            </ul>
+            <div class="sidebar-footer">
+                <div class="connection-status" id="sidebarStatus">
+                    <span class="status-dot"></span>
+                    <span id="connectionText">Disconnected</span>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Top Bar -->
+            <header class="top-bar">
+                <div class="page-title">
+                    <h2 id="pageTitle">Dashboard</h2>
+                </div>
+                <div class="top-controls">
+                    <div class="control-group">
+                        <button id="connectBtn" class="btn btn-success">🔌 Connect</button>
+                        <button id="recordBtn" class="btn btn-danger">🔴 Record</button>
+                        <button id="exportCSVBtn" class="btn btn-primary">📊 CSV</button>
+                        <button id="exportJSONBtn" class="btn btn-primary">📁 JSON</button>
+                    </div>
+                    <div class="record-info">
+                        <span id="recordCount">0</span> packets
+                    </div>
+                </div>
+            </header>
+
+            <!-- Page: Dashboard -->
+            <div class="page active" id="page-dashboard">
+                <div class="dashboard-grid">
+                    <!-- Quick Stats -->
+                    <div class="stat-card altitude-card">
+                        <div class="stat-icon">🏔️</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="altitude">--</span>
+                            <span class="stat-label">Altitude (m)</span>
+                        </div>
+                    </div>
+                    <div class="stat-card velocity-card">
+                        <div class="stat-icon">⚡</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="velocity">--</span>
+                            <span class="stat-label">Velocity (m/s)</span>
+                        </div>
+                    </div>
+                    <div class="stat-card temp-card">
+                        <div class="stat-icon">🌡️</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="temperature">--</span>
+                            <span class="stat-label">Temperature (°C)</span>
+                        </div>
+                    </div>
+                    <div class="stat-card pressure-card">
+                        <div class="stat-icon">💨</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="pressure">--</span>
+                            <span class="stat-label">Pressure (kPa)</span>
+                        </div>
+                    </div>
+
+                    <!-- Mini 3D View -->
+                    <div class="card mini-3d-card">
+                        <h3>🚀 Attitude</h3>
+                        <div id="rocket3DContainer"></div>
+                        <div class="attitude-values">
+                            <span>R: <strong id="rollValue">0°</strong></span>
+                            <span>P: <strong id="pitchValue">0°</strong></span>
+                            <span>Y: <strong id="yawValue">0°</strong></span>
+                        </div>
+                    </div>
+
+                    <!-- Mini Map -->
+                    <div class="card mini-map-card">
+                        <h3>📍 Location</h3>
+                        <div id="miniMap"></div>
+                        <div class="gps-values">
+                            <span>Lat: <strong id="latitude">--</strong></span>
+                            <span>Lon: <strong id="longitude">--</strong></span>
+                            <span>Sats: <strong id="satellites">--</strong></span>
+                        </div>
+                    </div>
+
+                    <!-- IMU Data -->
+                    <div class="card imu-card">
+                        <h3>📊 IMU Data</h3>
+                        <div class="imu-grid">
+                            <div class="imu-section">
+                                <h4>Attitude (°)</h4>
+                                <div class="imu-values">
+                                    <span class="axis-x">X: <strong id="gyroX">--</strong></span>
+                                    <span class="axis-y">Y: <strong id="gyroY">--</strong></span>
+                                    <span class="axis-z">Z: <strong id="gyroZ">--</strong></span>
+                                </div>
+                            </div>
+                            <div class="imu-section">
+                                <h4>Accelerometer (m/s²)</h4>
+                                <div class="imu-values">
+                                    <span class="axis-x">X: <strong id="accelX">--</strong></span>
+                                    <span class="axis-y">Y: <strong id="accelY">--</strong></span>
+                                    <span class="axis-z">Z: <strong id="accelZ">--</strong></span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Power & Signal Status -->
+                    <div class="card power-card">
+                        <h3>📡 RF Link Status</h3>
+                        <div class="power-grid">
+                            <div class="power-item">
+                                <span class="power-label">RSSI</span>
+                                <span class="power-value" id="signalStrength">--</span>
+                                <span class="power-unit">dBm</span>
+                                <div class="signal-bars" id="signalBars">
+                                    <div class="bar"></div>
+                                    <div class="bar"></div>
+                                    <div class="bar"></div>
+                                    <div class="bar"></div>
+                                    <div class="bar"></div>
+                                </div>
+                            </div>
+                            <div class="power-item">
+                                <span class="power-label">Link Quality</span>
+                                <span class="power-value" id="linkQuality">--</span>
+                                <span class="power-unit">%</span>
+                                <div class="progress-bar">
+                                    <div class="progress lq-bar" id="lqBar"></div>
+                                </div>
+                            </div>
+                            <div class="power-item">
+                                <span class="power-label">Battery</span>
+                                <span class="power-value" id="voltage">--</span>
+                                <span class="power-unit">mV</span>
+                                <div class="progress-bar">
+                                    <div class="progress" id="voltageBar"></div>
+                                </div>
+                            </div>
+                            <div class="power-item">
+                                <span class="power-label">Packets</span>
+                                <span class="power-value" id="packetCount">--</span>
+                                <span class="power-unit">rx</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ELRS Configuration Panel -->
+                    <div class="card elrs-card">
+                        <h3>⚙️ ELRS Config</h3>
+                        <div class="elrs-controls">
+                            <div class="control-row">
+                                <label>TLM Ratio</label>
+                                <select id="tlmRatio" class="elrs-select">
+                                    <option value="0">Off</option>
+                                    <option value="1">1:128</option>
+                                    <option value="2">1:64</option>
+                                    <option value="3">1:32</option>
+                                    <option value="4">1:16</option>
+                                    <option value="5">1:8</option>
+                                    <option value="6">1:4</option>
+                                    <option value="7" selected>1:2</option>
+                                </select>
+                            </div>
+                            <div class="control-row">
+                                <label>Packet Rate</label>
+                                <select id="packetRate" class="elrs-select">
+                                    <option value="0">25Hz</option>
+                                    <option value="1" selected>50Hz</option>
+                                    <option value="2">100Hz</option>
+                                    <option value="3">150Hz</option>
+                                    <option value="4">200Hz</option>
+                                    <option value="5">250Hz</option>
+                                    <option value="6">500Hz</option>
+                                </select>
+                            </div>
+                            <div class="control-row">
+                                <label>TX Power</label>
+                                <select id="txPower" class="elrs-select">
+                                    <option value="25">25%</option>
+                                    <option value="50">50%</option>
+                                    <option value="75">75%</option>
+                                    <option value="100" selected>100%</option>
+                                </select>
+                            </div>
+                            <button id="applyElrsBtn" class="btn btn-primary btn-full">Apply Config</button>
+                            <div class="control-row arm-control">
+                                <label>ARM Switch</label>
+                                <button id="armBtn" class="btn btn-danger arm-btn">🔒 SAFE</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Page: GPS Map -->
+            <div class="page" id="page-map">
+                <div class="map-container">
+                    <div id="fullMap"></div>
+                    <div class="map-overlay">
+                        <div class="map-info-panel">
+                            <h3>📍 GPS Information</h3>
+                            <div class="map-stats">
+                                <div class="map-stat">
+                                    <span class="label">Latitude</span>
+                                    <span class="value" id="mapLatitude">--</span>
+                                </div>
+                                <div class="map-stat">
+                                    <span class="label">Longitude</span>
+                                    <span class="value" id="mapLongitude">--</span>
+                                </div>
+                                <div class="map-stat">
+                                    <span class="label">Altitude</span>
+                                    <span class="value" id="mapAltitude">--</span>
+                                </div>
+                                <div class="map-stat">
+                                    <span class="label">Satellites</span>
+                                    <span class="value" id="mapSatellites">--</span>
+                                </div>
+                                <div class="map-stat">
+                                    <span class="label">Distance</span>
+                                    <span class="value" id="mapDistance">--</span>
+                                </div>
+                            </div>
+                            <div class="map-controls">
+                                <button id="centerMapBtn" class="btn btn-small">📍 Center</button>
+                                <button id="clearTrackBtn" class="btn btn-small btn-warning">🗑️ Clear</button>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="followRocket" checked>
+                                    Follow
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Page: Charts -->
+            <div class="page" id="page-charts">
+                <div class="charts-grid">
+                    <div class="chart-card large">
+                        <h3>📈 Altitude & Velocity</h3>
+                        <canvas id="altitudeChart"></canvas>
+                    </div>
+                    <div class="chart-card large">
+                        <h3>🌡️ Temperature & Pressure</h3>
+                        <canvas id="environmentChart"></canvas>
+                    </div>
+                    <div class="chart-card large">
+                        <h3>📊 Acceleration</h3>
+                        <canvas id="accelChart"></canvas>
+                    </div>
+                    <div class="chart-card large">
+                        <h3>🔄 Gyroscope</h3>
+                        <canvas id="gyroChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Page: 3D View -->
+            <div class="page" id="page-3d">
+                <div class="full-3d-container">
+                    <div id="rocket3DContainerFull"></div>
+                    <div class="attitude-panel">
+                        <h3>Attitude Data</h3>
+                        <div class="attitude-data">
+                            <div class="attitude-item">
+                                <span class="label">Roll</span>
+                                <span class="value" id="rollValueFull">0°</span>
+                            </div>
+                            <div class="attitude-item">
+                                <span class="label">Pitch</span>
+                                <span class="value" id="pitchValueFull">0°</span>
+                            </div>
+                            <div class="attitude-item">
+                                <span class="label">Yaw</span>
+                                <span class="value" id="yawValueFull">0°</span>
+                            </div>
+                        </div>
+                        <div class="attitude-data">
+                            <div class="attitude-item">
+                                <span class="label">Accel X</span>
+                                <span class="value" id="accelXFull">--</span>
+                            </div>
+                            <div class="attitude-item">
+                                <span class="label">Accel Y</span>
+                                <span class="value" id="accelYFull">--</span>
+                            </div>
+                            <div class="attitude-item">
+                                <span class="label">Accel Z</span>
+                                <span class="value" id="accelZFull">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Page: Logs -->
+            <div class="page" id="page-logs">
+                <div class="logs-container">
+                    <div class="logs-header">
+                        <h3>📝 Telemetry Logs</h3>
+                        <div class="logs-controls">
+                            <button id="clearLogsBtn" class="btn btn-warning">🗑️ Clear</button>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="autoScrollLogs" checked>
+                                Auto-scroll
+                            </label>
+                        </div>
+                    </div>
+                    <div class="logs-content" id="logsContent">
+                        <div class="log-entry info">System initialized...</div>
+                    </div>
+                    <div class="logs-footer">
+                        <span>Last: <code id="lastPacket">--</code></span>
+                        <span>Time: <code id="lastUpdate">--</code></span>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Hidden elements for compatibility -->
+    <input type="hidden" id="packetInput">
+    <input type="hidden" id="baudRate" value="115200">
+    <div id="rawPacket" style="display:none"></div>
+    <div id="statusIndicator" style="display:none"></div>
+    <div id="statusText" style="display:none"></div>
+    <div id="serialStatus" style="display:none"></div>
+    <button id="simulateBtn" style="display:none"></button>
+    <button id="parseBtn" style="display:none"></button>
+    <button id="clearDataBtn" style="display:none"></button>
+    <div id="recordStatus" style="display:none"></div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

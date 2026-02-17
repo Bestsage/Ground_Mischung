@@ -1,0 +1,1 @@
+mipidsi::Display<SPIInterface<embedded_hal_bus::spi::RefCellDevice<'d, esp_hal::spi::master::Spi<'d, esp_hal::peripherals::SPI2, FullDuplexMode>, Output<'d>, esp_hal::delay::Delay>, SharedPin<'d, Output<'d>>>, ST7789, ()>

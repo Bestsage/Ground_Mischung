@@ -1,0 +1,14 @@
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/release/deps/serde-65d1a7923f76a2a5.d: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/bestsage/Documents/GroundMischung/Ground\ Hardware/target/release/build/serde-3c6ce5bb76401eb7/out/private.rs
+
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/release/deps/libserde-65d1a7923f76a2a5.rlib: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/bestsage/Documents/GroundMischung/Ground\ Hardware/target/release/build/serde-3c6ce5bb76401eb7/out/private.rs
+
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/release/deps/libserde-65d1a7923f76a2a5.rmeta: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/bestsage/Documents/GroundMischung/Ground\ Hardware/target/release/build/serde-3c6ce5bb76401eb7/out/private.rs
+
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/bestsage/Documents/GroundMischung/Ground\ Hardware/target/release/build/serde-3c6ce5bb76401eb7/out/private.rs:
+
+# env-dep:OUT_DIR=/home/bestsage/Documents/GroundMischung/Ground Hardware/target/release/build/serde-3c6ce5bb76401eb7/out

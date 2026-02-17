@@ -1,0 +1,204 @@
+# Project Description: Ground Mischung / Ground Hardware
+
+This project is a Rust-based ground station firmware for the ESP32-C3 microcontroller, designed to monitor and control a rocket via an ELRS (ExpressLRS) radio link using the CRSF protocol.
+
+## Core Features
+1. **Telemetry Monitoring**: Receives and displays real-time data from the rocket, including:
+   - GPS Position (Latitude, Longitude, Satellites)
+   - Altitude (Barometric/GPS) & Vertical Speed
+   - Signal Strength (RSSI) & Link Quality (LQ)
+   - Battery Voltage
+   - Attitude (Gyro/Accel - placeholder in struct)
+2. **Control Uplink**: Sends control commands to the rocket via CRSF RC Channels (50Hz):
+   - ARM / DISARM
+   - Flight Mode Selection
+   - Pyro Channel Testing
+   - Abort Command
+3. **User Interface**: 
+   - ST7789 IPS Display (240x280)
+   - Rotary Encoder Navigation (Turn to scroll, Click to select/toggle, Long press to enter/exit)
+   - Multiple Screens: Dashboard, Real-time Graph, System Health, Settings, etc.
+
+## Architecture
+
+The project uses the **Embassy** framework for async embedded Rust.
+
+### Concurrency Model
+- **Async Tasks**:
+  - `main`: Initializes hardware, handling display updates loop (20Hz).
+  - `crsf_tx_task`: Sends RC channel packets to the ELRS module at 50Hz.
+  - `crsf_rx_task`: Reads UART bytes, parses CRSF packets, and updates global state.
+  - `encoder_task`: Polls rotary encoder GPIOs at 1kHz for responsiveness.
+- **Shared State**: 
+  - Uses `critical_section::Mutex<RefCell<T>>` for safe data exchange between tasks.
+  - **`ROCKET_STATE`**: Stores latest telemetry (Alt, GPS, RSSI, etc.).
+  - **`MENU_STATE`**: Stores UI state (Current screen, selection, settings, history graph).
+  - **`CONTROL`**: Stores command state (Arm switch, abort request) to be sent via CRSF.
+
+### Hardware Abstraction Layer (HAL)
+- **Target**: `esp32c3`
+- **Crate**: `esp-hal` (v0.21.1)
+- **Time**: `embassy-time` for delays and tickers.
+- **Graphics**: `embedded-graphics` + `mipidsi` driver for ST7789.
+
+### Pinout (ESP32-C3 Super Mini)
+- **UART1 (CRSF)**: 
+  - TX: GPIO7 (to ELRS RX)
+  - RX: GPIO6 (from ELRS TX)
+- **SPI2 (Display)**:
+  - SCK: GPIO2
+  - MOSI: GPIO3
+  - CS: GPIO10
+  - DC: GPIO21
+  - RST: GPIO20
+- **Controls**:
+  - Encoder A: GPIO1
+  - Encoder B: GPIO5
+  - Encoder Btn: GPIO0
+
+## File Structure & Responsibilities
+
+### `src/main.rs` (Entry Point)
+- Application entry (`#[esp_hal_embassy::main]`).
+- Hardware initialization (System clocks, UART, SPI, GPIO).
+- Spawns all async tasks.
+- Contains the Global Static States (`ROCKET_STATE`, etc.).
+- Main loop handles Display Refresh (reads state snapshots -> updates display driver).
+
+### `src/menu.rs` (UI Logic)
+- **Enums**: `Screen` (Home, Graph, Settings, etc.), `ComponentStatus`.
+- **Structs**: `MenuState`, `HealthStatus`, `ControlSettings`.
+- **Logic**: 
+  - `handle_encoder(delta)`: Navigates menus or changes values.
+  - `handle_short_press()`: Toggles settings or enters sub-menus.
+  - `push_history(alt)`: Updates the circular buffer for the altitude graph.
+
+### `src/crsf.rs` (Protocol Layer)
+- **`CrsfParser`**: State machine that consumes bytes and outputs `PacketType`.
+- **Packet Handling**: 
+  - `LinkStatistics`: Extracts RSSI/LQ.
+  - `Gps`: Extracts Lat/Lon/Alt.
+  - `Vario`: Extracts Vertical Speed.
+- **Packet Building**:
+  - `build_rc_channels`: Converts `ControlState` (bools) into CRSF 11-bit packed channel data (16 channels).
+  - Implements CRC8 validation.
+
+### `src/display.rs` (Presentation Layer)
+- Drivers for ST7789 display using `embedded-graphics`.
+- **`Driver::update`**: Main render method, delegates to specific screen drawers.
+- **Drawing Methods**: 
+  - `draw_home`: Big status (Safe/Armed) + Grid of key data.
+  - `draw_graph`: Plots altitude history line chart.
+  - `draw_rf_link`: Visualizes RSSI signal bars.
+  - `draw_control`: UI for toggling Arm/Pyro/Abort.
+- Handles theming and layout.
+
+### `Cargo.toml`
+- Dependencies: `esp-hal`, `embassy-*`, `embedded-graphics`, `heapless`.
+- Profile: Optimized for size (`opt-level = "s"`) and release performance.
+
+## Data Flows
+
+1. **Telemetry (Rx)**: `UART RX` -> `crsf_rx_task` -> Parser -> `critical_section` -> `ROCKET_STATE` -> `main` loop -> `display.rs`.
+2. **Control (Tx)**: `display` (User Input) -> `MENU_STATE` -> `main` loop sync -> `CONTROL` -> `crsf_tx_task` -> `build_rc_channels` -> `UART TX`.
+3. **UI Interaction**: `encoder_task` -> `MENU_STATE` -> `display.rs`.
+
+## Key Data Structures
+
+```rust
+pub struct RocketState {
+    pub alt: f32,
+    pub rssi: i32,
+    pub link_quality: u8,
+    pub armed: bool,
+    pub lat: f32,
+    pub lon: f32,
+    // ...
+}
+
+pub struct ControlState {
+    pub arm_switch: bool,
+    pub mode: u8, // Flight Mode
+    pub test_pyro: bool,
+    pub abort: bool,
+}
+```
+
+## Serial Protocol (PC Communication)
+
+The ground station outputs telemetry data over USB serial and accepts commands from a PC companion app.
+
+### Connection Settings
+- **Port**: `/dev/ttyACM0` (Linux) or `COMx` (Windows)
+- **Baud Rate**: 115200
+- **Data**: 8N1
+
+### Output Format (Ground Station → PC)
+
+**Telemetry Data (4Hz):**
+```
+DATA:{"rssi":-40,"lq":98,"p":1.2,"r":-0.3,"y":45.0,"vario":0.5,"batt":3700,"sats":8,"alt":100,"pkts":1234}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `rssi` | i32 | Signal strength in dBm |
+| `lq` | u8 | Link quality 0-100% |
+| `p` | f32 | Pitch angle (degrees) |
+| `r` | f32 | Roll angle (degrees) |
+| `y` | f32 | Yaw angle (degrees) |
+| `vario` | f32 | Vertical speed (m/s) |
+| `batt` | u32 | Battery voltage (mV) |
+| `sats` | u8 | GPS satellites |
+| `alt` | f32 | Altitude (m) |
+| `pkts` | u32 | CRSF packets received |
+
+**Config Status:**
+```
+CFG:{"tlm":7,"rate":1,"pwr":100,"theme":0,"scr":0,"act":0}
+```
+
+### Input Commands (PC → Ground Station)
+
+Format: `CMD:TYPE:VALUE\n`
+
+| Command | Value Range | Description |
+|---------|-------------|-------------|
+| `CMD:TLM:n` | 0-7 | Set telemetry ratio (0=Off, 7=1:2) |
+| `CMD:RATE:n` | 0-6 | Set packet rate (0=25Hz, 6=500Hz) |
+| `CMD:PWR:n` | 25/50/75/100 | Set TX power % |
+| `CMD:THEME:n` | 0-3 | Set UI theme |
+| `CMD:ARM:n` | 0/1 | Arm/disarm switch |
+| `CMD:SCREEN:n` | 0-2 | Change screen |
+| `CMD:ENTER:1` | 1 | Toggle edit mode |
+| `CMD:SELECT:n` | 0-4 | Select menu item |
+
+### Example Python Code
+
+```python
+import serial
+import json
+
+ser = serial.Serial('/dev/ttyACM0', 115200)
+
+while True:
+    line = ser.readline().decode().strip()
+    if line.startswith('DATA:'):
+        data = json.loads(line[5:])
+        print(f"RSSI: {data['rssi']}dBm, LQ: {data['lq']}%")
+    
+# Send command
+ser.write(b'CMD:TLM:5\n')  # Set telemetry ratio to 1:8
+```
+
+### Filtering Serial Output
+
+To see only telemetry data:
+```bash
+cat /dev/ttyACM0 | grep "^DATA:"
+```
+
+To see only config updates:
+```bash
+cat /dev/ttyACM0 | grep "^CFG:"
+```

@@ -1,0 +1,65 @@
+[package]
+name = "ground-station"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ESP HAL & Backtrace - Downgrade to 0.21.x to fix interrupt crash bug in 0.22.0
+esp-hal = { version = "0.21.1", features = ["esp32c3"] }
+esp-backtrace = { version = "0.14.0", features = ["esp32c3", "exception-handler", "panic-handler", "println"] }
+esp-println = { version = "0.11.0", features = ["esp32c3", "log"] }
+esp-alloc = { version = "0.4.0" }
+esp-hal-embassy = { version = "0.4.0", features = ["esp32c3"] }
+
+# Async IO
+embedded-io = "0.6.1"
+embedded-io-async = "0.6.1"
+embedded-hal = "1.0.0" 
+embedded-hal-bus = "0.1.0"
+
+# Embassy Async
+embassy-executor = { version = "0.6.0", features = ["task-arena-size-12288", "executor-thread"] }
+# Added tick-hz and generic-queue features for timer driver compatibility
+embassy-time = { version = "0.3.2", features = ["tick-hz-1_000_000", "generic-queue-8"] }
+embassy-sync = { version = "0.6.0" }
+embassy-futures = { version = "0.1.1" }
+
+# Graphics & UI
+embedded-graphics = "0.8.1"
+mipidsi = "0.8.0"
+display-interface-spi = "0.5.0"
+display-interface = "0.5.0"
+
+# Input
+rotary-encoder-hal = "0.6.0"
+
+# Utils
+heapless = "0.8.0"
+ufmt = "0.2.0"
+log = "0.4.22"
+static_cell = "2.1.0"
+critical-section = "1.1.2"
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 's'
+overflow-checks = false
+
+[[bin]]
+name = "ground-station"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "minimal"
+path = "src/main_minimal.rs"
+test = false
+bench = false

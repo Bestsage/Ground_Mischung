@@ -1,0 +1,10 @@
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/riscv32imc-unknown-none-elf/release/deps/embedded_can-fc90dcb189bc5cf6.d: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/blocking.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/nb.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/id.rs
+
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/riscv32imc-unknown-none-elf/release/deps/libembedded_can-fc90dcb189bc5cf6.rlib: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/blocking.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/nb.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/id.rs
+
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/riscv32imc-unknown-none-elf/release/deps/libembedded_can-fc90dcb189bc5cf6.rmeta: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/blocking.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/nb.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/id.rs
+
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/lib.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/blocking.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/nb.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/embedded-can-0.4.1/src/id.rs:

@@ -1,0 +1,14 @@
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/debug/deps/serde-7de0450eedb1158a.d: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/bestsage/Documents/GroundMischung/Ground\ Hardware/target/debug/build/serde-d37bc533ee22e600/out/private.rs
+
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/debug/deps/libserde-7de0450eedb1158a.rlib: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/bestsage/Documents/GroundMischung/Ground\ Hardware/target/debug/build/serde-d37bc533ee22e600/out/private.rs
+
+/home/bestsage/Documents/GroundMischung/Ground Hardware/target/debug/deps/libserde-7de0450eedb1158a.rmeta: /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/bestsage/Documents/GroundMischung/Ground\ Hardware/target/debug/build/serde-d37bc533ee22e600/out/private.rs
+
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/bestsage/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/bestsage/Documents/GroundMischung/Ground\ Hardware/target/debug/build/serde-d37bc533ee22e600/out/private.rs:
+
+# env-dep:OUT_DIR=/home/bestsage/Documents/GroundMischung/Ground Hardware/target/debug/build/serde-d37bc533ee22e600/out
