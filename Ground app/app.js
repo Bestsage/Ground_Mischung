@@ -21,6 +21,7 @@ class RocketTelemetry {
             accelY: null,
             accelZ: null,
             signalStrength: null,
+            downlinkRssi: null,   // Downlink RSSI from ELRS
             linkQuality: null,    // New: ELRS link quality (0-100%)
             packetCount: null     // New: CRSF packet count
         };
@@ -1234,8 +1235,9 @@ class RocketTelemetry {
         this.previousData = { ...this.data };
 
         // Map JSON fields to internal data structure
-        // t = {"rssi":-40,"lq":98,"p":1.2,"r":-0.3,"y":45.0,"vario":0.5,"batt":3700,"sats":8,"alt":100,"pkts":1234}
+        // t = {"rssi":-40,"drssi":-50,"lq":98,"p":1.2,"r":-0.3,"y":45.0,"vario":0.5,"batt":3700,"sats":8,"alt":100,"pkts":1234,"lat":48.8,"lon":2.35,"temp":22.5,"press":1013.2}
         if (t.rssi !== undefined) this.data.signalStrength = t.rssi;
+        if (t.drssi !== undefined) this.data.downlinkRssi = t.drssi;
         if (t.lq !== undefined) this.data.linkQuality = t.lq;
         if (t.p !== undefined) this.data.gyroX = t.p;      // Pitch
         if (t.r !== undefined) this.data.gyroY = t.r;      // Roll
@@ -1245,6 +1247,10 @@ class RocketTelemetry {
         if (t.sats !== undefined) this.data.satellites = t.sats;
         if (t.alt !== undefined) this.data.altitude = t.alt;
         if (t.pkts !== undefined) this.data.packetCount = t.pkts;
+        if (t.lat !== undefined) this.data.latitude = t.lat;
+        if (t.lon !== undefined) this.data.longitude = t.lon;
+        if (t.temp !== undefined) this.data.temperature = t.temp;
+        if (t.press !== undefined) this.data.pressure = t.press;
 
         return this.data;
     }

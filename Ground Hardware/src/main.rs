@@ -248,7 +248,7 @@ async fn main(spawner: Spawner) {
     //   TX : GPIO17
     //   RX : GPIO18
     // ================================================================
-    let uart_config = UartConfig::default().with_baudrate(400_000);
+    let uart_config = UartConfig::default().with_baudrate(420000);
     let uart1 = Uart::new(peripherals.UART1, uart_config)
         .unwrap()
         .with_rx(peripherals.GPIO18)
@@ -351,7 +351,7 @@ async fn main(spawner: Spawner) {
         display_driver.update(&state_snapshot, &menu_snapshot);
 
         if frame_counter % 20 == 0 {
-            // Send telemetry JSON to PC (50Hz effective rate)
+            // Send telemetry JSON to PC (~50Hz effective rate)
             let json = serial::build_telemetry_json(
                 state_snapshot.uplink_rssi,
                 state_snapshot.downlink_rssi,
@@ -364,8 +364,25 @@ async fn main(spawner: Spawner) {
                 state_snapshot.satellites,
                 state_snapshot.alt,
                 state_snapshot.elrs_packet_count,
+                state_snapshot.lat,
+                state_snapshot.lon,
+                state_snapshot.temp,
+                state_snapshot.press,
             );
             println!("{}", json);
+        }
+
+        // Send config status to PC every 500ms (2Hz)
+        if frame_counter % 500 == 0 {
+            let cfg_json = serial::build_config_json(
+                menu_snapshot.settings.tlm_ratio,
+                menu_snapshot.settings.packet_rate,
+                menu_snapshot.settings.tx_power,
+                menu_snapshot.theme_idx,
+                menu_snapshot.current_screen as u8,
+                menu_snapshot.is_active,
+            );
+            println!("{}", cfg_json);
         }
 
         frame_counter = frame_counter.wrapping_add(1);
@@ -842,180 +859,135 @@ async fn encoder_task(enc_a: Input<'static>, enc_b: Input<'static>, enc_btn: Inp
     }
 }
 
-/// CRSF Transmit task - sends RC channels at 50Hz
+/// CRSF Transmit task - sends RC channels at 50Hz + ELRS config
+/// Config sequence: Ping → wait 100ms → Write each param with 50ms gaps → verify
 #[embassy_executor::task]
 async fn crsf_tx_task() {
-    let mut ticker = Ticker::every(Duration::from_hz(100));
+    let mut ticker = Ticker::every(Duration::from_hz(50)); // True 50Hz for RC
     let mut packet_count: u32 = 0;
-    let mut config_send_counter: u8 = 0;
 
-    println!("CRSF TX task started (50Hz) on Core 0");
+    // Config state machine
+    // 0 = idle, 1 = ping sent (wait), 2 = rate, 3 = tlm, 4 = power, 5 = done/retry
+    let mut config_step: u8 = 0;
+    let mut config_step_tick: u32 = 0; // tick when last step was executed
+    let mut config_retry_count: u8 = 0;
+    const CONFIG_STEP_DELAY: u32 = 5; // 5 ticks = 100ms at 50Hz between config steps
+    const CONFIG_PING_DELAY: u32 = 10; // 10 ticks = 200ms after ping
+    const MAX_CONFIG_RETRIES: u8 = 3;
+
+    println!("CRSF TX task started (50Hz RC channels) on Core 0");
 
     loop {
         ticker.next().await;
+        packet_count = packet_count.wrapping_add(1);
 
-        // Check if ELRS config needs to be sent
-        let (config_dirty, tlm_ratio, pkt_rate) = critical_section::with(|cs| {
+        // ========== ELRS Config State Machine ==========
+        let (config_dirty, tlm_ratio, pkt_rate, tx_power) = critical_section::with(|cs| {
             let menu = MENU_STATE.borrow_ref(cs);
             (
                 menu.settings.elrs_config_dirty,
                 menu.settings.tlm_ratio,
                 menu.settings.packet_rate,
+                menu.settings.tx_power,
             )
         });
 
-        if config_dirty {
-            // Send config packets in sequence SLOWLY (every 50 ticks = 500ms)
-            // 0: Device Ping (wake up TX module)
-            // 1: Packet Rate
-            // 2: TLM Ratio
-            // 3: Clear flag
+        if config_dirty && config_step == 0 {
+            // Start config sequence
+            config_step = 1;
+            config_step_tick = packet_count;
+            config_retry_count = 0;
+            println!("ELRS CONFIG: Starting config sequence (rate={} tlm={} pwr={})",
+                     pkt_rate, tlm_ratio, tx_power);
+        }
 
-            // Only proceed if packet_count is a multiple of 50
-            if packet_count % 50 == 0 {
-                config_send_counter = config_send_counter.wrapping_add(1);
+        if config_step > 0 {
+            let elapsed = packet_count.wrapping_sub(config_step_tick);
 
-                match config_send_counter % 5 {
-                    // Use 5 states: 1 (Ping), 2 (Rate), 3 (Tlm), 4 (Done), 0 (Internal Wait)
-                    1 => {
-                        // First: send Device Ping to wake up TX module
-                        println!("ELRS CONFIG: Sending Device Ping to TX module (0xEE)");
-                        let ping_frame = crsf::build_device_ping(crsf::CRSF_ADDRESS_TX);
-                        critical_section::with(|cs| {
-                            if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
-                                let _ = tx.write_all(&ping_frame);
-                            }
-                        });
-                    }
-                    2 => {
-                        // Second: send packet rate config
-                        println!("ELRS CONFIG: Setting packet rate to index {}", pkt_rate);
-                        let config_frame = crsf::build_elrs_packet_rate(pkt_rate);
-                        critical_section::with(|cs| {
-                            if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
-                                let _ = tx.write_all(&config_frame);
-                            }
-                        });
-                    }
-                    3 => {
-                        // Third: send TLM ratio config
-                        println!("ELRS CONFIG: Setting TLM ratio to index {}", tlm_ratio);
-                        let config_frame = crsf::build_elrs_tlm_ratio(tlm_ratio);
-                        critical_section::with(|cs| {
-                            if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
-                                let _ = tx.write_all(&config_frame);
-                            }
-                        });
-                    }
-                    4 => {
-                        // Done, clear dirty flag
+            match config_step {
+                1 => {
+                    // Step 1: Send Device Ping
+                    println!("ELRS CONFIG [1/5]: Device Ping → TX (0xEE)");
+                    let ping = crsf::build_device_ping(crsf::CRSF_ADDRESS_TX);
+                    critical_section::with(|cs| {
+                        if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
+                            let _ = tx.write_all(&ping);
+                        }
+                    });
+                    config_step = 2;
+                    config_step_tick = packet_count;
+                }
+                2 if elapsed >= CONFIG_PING_DELAY => {
+                    // Step 2: Write Packet Rate (ELRS param 1)
+                    println!("ELRS CONFIG [2/5]: Packet Rate → index {}", pkt_rate);
+                    let frame = crsf::build_elrs_packet_rate(pkt_rate);
+                    critical_section::with(|cs| {
+                        if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
+                            let _ = tx.write_all(&frame);
+                        }
+                    });
+                    config_step = 3;
+                    config_step_tick = packet_count;
+                }
+                3 if elapsed >= CONFIG_STEP_DELAY => {
+                    // Step 3: Write TLM Ratio (ELRS param 2)
+                    println!("ELRS CONFIG [3/5]: TLM Ratio → index {}", tlm_ratio);
+                    let frame = crsf::build_elrs_tlm_ratio(tlm_ratio);
+                    critical_section::with(|cs| {
+                        if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
+                            let _ = tx.write_all(&frame);
+                        }
+                    });
+                    config_step = 4;
+                    config_step_tick = packet_count;
+                }
+                4 if elapsed >= CONFIG_STEP_DELAY => {
+                    // Step 4: Write TX Power (ELRS param 3)
+                    // Convert power percentage to ELRS power index:
+                    // ELRS power levels: 0=10mW, 1=25mW, 2=50mW, 3=100mW, 4=250mW, 5=500mW, 6=1000mW, 7=2000mW
+                    // Map our 25/50/75/100% to reasonable indices
+                    let power_idx = match tx_power {
+                        0..=25 => 1,   // 25mW
+                        26..=50 => 3,  // 100mW
+                        51..=75 => 5,  // 500mW
+                        _ => 7,        // 2000mW (max)
+                    };
+                    println!("ELRS CONFIG [4/5]: TX Power → {}% (ELRS index {})", tx_power, power_idx);
+                    let frame = crsf::build_elrs_tx_power(power_idx);
+                    critical_section::with(|cs| {
+                        if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
+                            let _ = tx.write_all(&frame);
+                        }
+                    });
+                    config_step = 5;
+                    config_step_tick = packet_count;
+                }
+                5 if elapsed >= CONFIG_STEP_DELAY => {
+                    // Step 5: Done or retry
+                    config_retry_count += 1;
+                    if config_retry_count < MAX_CONFIG_RETRIES {
+                        // Retry the full sequence for reliability
+                        println!("ELRS CONFIG [5/5]: Retry {}/{}", config_retry_count, MAX_CONFIG_RETRIES);
+                        config_step = 1;
+                        config_step_tick = packet_count;
+                    } else {
+                        // All retries done, clear dirty flag
                         critical_section::with(|cs| {
                             MENU_STATE.borrow_ref_mut(cs).settings.elrs_config_dirty = false;
                         });
-                        println!("ELRS CONFIG: Config sent, dirty flag cleared");
-                        config_send_counter = 0; // Reset
-                    }
-                    _ => {
-                        // Wait state or initial 0
+                        println!("ELRS CONFIG: Complete (sent {}x)", MAX_CONFIG_RETRIES);
+                        config_step = 0;
+                        config_retry_count = 0;
                     }
                 }
+                _ => {
+                    // Waiting for delay to elapse
+                }
             }
-        } else {
-            config_send_counter = 0; // Reset if not dirty
         }
 
-        // Regular RC channels transmission
-        let ctrl = critical_section::with(|cs| *CONTROL.borrow_ref(cs));
-
-        // Check scheduling for telemetry packets
-        // Full cycle 30 ticks (approx 1.5s at 20Hz loop - Wait, loop is 50Hz!)
-        // User said: "Assuming a loop time of ~50ms (20Hz)".
-        // BUT code says: `Ticker::every(Duration::from_hz(50));` -> 20ms loop.
-        // If the receiving end expects a somewhat slower rate or based on 50ms ticks, I should adjust.
-        // If I keep 50Hz loop, "tick" increments every 20ms.
-        // User table:
-        // GPS ~4Hz. Tick%5==0. 50Hz/5 = 10Hz. Too fast?
-        // User assumed 20Hz loop. So 5 ticks = 250ms -> 4Hz.
-        // My loop is 50Hz (20ms).
-        // To match rates:
-        // GPS ~4Hz -> 250ms interval -> Every 12.5 ticks? Round to 12 or 13.
-        // Let's change the ticker only for telemetry distribution OR change the modulus.
-        // If I change modulus:
-        // 50Hz / X = 4Hz => X = 12.5.
-        // Let's slow down the ticker for telemetry OR use a separate counter or divider.
-        // I will implement a "crsf_tick" that increments at approx 20Hz (every 2.5 real ticks? or just every 50ms).
-        // Let's use `telemetry_ticker` separate or just modulo on the 50Hz loop with larger numbers?
-        // Simpler: Use a separate counter that updates every 50ms.
-        // Or just adjust the scheduler logic to 50Hz base.
-        // User wrote: "Assuming a loop time of ~50ms (20Hz)".
-        // THIS MEANS THE USER WANTS THE TICKS TO BE 50ms APART.
-        // I should probably run the scheduling logic every 50ms (e.g., every 2nd or 3rd loop, or use a separate timer).
-        // Let's change `crsf_tx_task` loop to match the user assumption if possible, or handle it properly.
-        // However, RC channels (50Hz) are standard. I shouldn't slow down RC to 20Hz.
-        // So I will send RC every 20ms (50Hz), but Telemetry frames only on specific ticks of a simulated 20Hz clock.
-
-        // 20ms per loop. We want 50ms ticks. 2.5 loops per tick.
-        // Let's do it every 2 loops = 40ms, or every 3 = 60ms?
-        // Let's stick to 20Hz target = 50ms.
-        // Every 5 loops (100ms) = 2 ticks?
-        // Let's run a "telemetry tick" counter.
-
-        packet_count = packet_count.wrapping_add(1);
-
-        // Run telemetry logic every 50ms approx?
-        // Let's just use the `packet_count` (50Hz) and scale the modulos?
-        // User wants: GPS 4Hz. 50Hz / 12 = ~4.16Hz.
-        // User wants: Bat 0.66Hz (every ~1.5s). 50Hz / 75 = 0.66Hz.
-        // The pattern provided is `Tick % 30` where Tick is 50ms.
-        // So period is 30 * 50ms = 1500ms = 1.5s.
-        // I can simulate "Tick" by incrementing a counter every 50ms?
-        // Or I can just map the 50Hz counter to the 20Hz requirements.
-        // 50Hz count % 75 (1.5s)
-        // GPS: ~4Hz.
-        // Let's implement a 'telemetry_tick' that increments every 50ms.
-        // Since loop is 20ms, we can increment 'telemetry_tick' every 2.5 loops... tricky.
-        // Let's just track time.
-
-        // Simpler approach: Send user requested packets at user requested rates using time checks?
-        // OR follow the user's specific "Tick % 5" logic assuming I have a 20Hz tick.
-        // I'll create a 20Hz sub-event.
-
-        if packet_count % 2 == 0 { // Every 40ms (close enough to 50ms?) No, that's 25Hz.
-             // If I do every 3 it's 16.6Hz.
-             // Let's use `state_machine_tick` variable.
-        }
-
-        // Best approach: Use a separate `Instant` to track "ticks"?
-        // Or just map to 50Hz.
-        // User Table:
-        // Tick % 5 == 0 (GPS) -> every 5 ticks.
-        // If I want 4Hz GPS, I need 5 ticks = 250ms => 1 tick = 50ms.
-        // So "Tick" is indeed 50ms.
-
-        // Timer for telemetry tick (20Hz / 50ms)
-        // Let's execute this block approximately every 50ms.
-        // 50Hz loop = 20ms.
-        // On loop 0 (0ms): Send Telemetry Tick X
-        // On loop 1 (20ms): -
-        // On loop 2 (40ms): -
-        // On loop 3 (60ms): Send Telemetry Tick X+1 ? (Drift)
-
-        // Let's just add a separate `telemetry_tick` variable and update it based on time.
-
-        // BUT WAIT, I cannot block the RC channel sending (50Hz).
-        // So I will send RC channels every loop.
-        // I will conditionally interleave a Telemetry packet if it's time.
-
-        // Quick hack: Use a simple decimator.
-        // 50Hz loop.
-        // 2 loops = 40ms. 3 loops = 60ms. Avg 2.5.
-        // Let's float a counter.
-
-        // Or just strictly follow "Tick" as a counter variable, incremented every ~50ms.
-        // I'll use a `last_telemetry_time` instant.
-
-        // Below implementation uses a 20Hz (50ms) throttle for the telemetry schedule.
-
+        // ========== Telemetry Interleaving (20Hz sub-tick) ==========
+        // RC at 50Hz, telemetry at 20Hz (every ~50ms = every 2-3 RC ticks)
         static mut LAST_TELEM_TIME: Option<Instant> = None;
         static mut TELEM_TICK: u32 = 0;
 
@@ -1041,67 +1013,49 @@ async fn crsf_tx_task() {
                 t
             };
 
+            let ctrl = critical_section::with(|cs| *CONTROL.borrow_ref(cs));
             let mut packet_to_send: Option<heapless::Vec<u8, 64>> = None;
 
-            // Scheduler logic from user
             let cycle_30 = tick % 30;
             let cycle_5 = tick % 5;
 
             if cycle_30 == 29 {
-                // Flight Mode
                 let mode_str = match ctrl.mode {
                     0 => "MANUAL",
                     1 => "STABILIZE",
                     _ => "AUTO",
                 };
-                // println!("Sending FlightMode: {}", mode_str);
                 packet_to_send = Some(crsf::payload_flight_mode(mode_str));
             } else if cycle_30 == 4 {
-                // Barometer
                 let (press, temp) = critical_section::with(|cs| {
                     let rs = ROCKET_STATE.borrow_ref(cs);
                     (rs.press, rs.temp)
                 });
-                // println!("Sending Baro");
-                // rs.press is f32 (hPa usually). Payload expects Pa.
-                // rs.temp is f32 (C). Payload expects C.
                 packet_to_send = Some(crsf::payload_barometer(press * 100.0, temp));
             } else if cycle_30 == 2 {
-                // Battery
                 let (volt, batt_rem) = critical_section::with(|cs| {
                     let rs = ROCKET_STATE.borrow_ref(cs);
-                    // batt_voltage is u32 mV.
-                    (rs.batt_voltage as f32 / 1000.0, 0u8) // TODO: calc remaining
+                    (rs.batt_voltage as f32 / 1000.0, 0u8)
                 });
-                // println!("Sending Batt");
                 packet_to_send = Some(crsf::payload_battery(volt, 0.0, 0.0, batt_rem));
-            } else {
-                if cycle_5 == 0 {
-                    // GPS
-                    let (lat, lon, spd, hdg, alt, sats) = critical_section::with(|cs| {
-                        let rs = ROCKET_STATE.borrow_ref(cs);
-                        (rs.lat, rs.lon, rs.vel, 0.0, rs.alt, rs.satellites)
-                    });
-                    // println!("Sending GPS");
-                    packet_to_send = Some(crsf::payload_gps(lat, lon, spd, hdg, alt, sats));
-                } else if cycle_5 == 1 {
-                    // Attitude
-                    let (p, r, y) = critical_section::with(|cs| {
-                        let rs = ROCKET_STATE.borrow_ref(cs);
-                        (rs.gyro[0], rs.gyro[1], rs.gyro[2])
-                    });
-                    // println!("Sending Att");
-                    packet_to_send = Some(crsf::payload_attitude(p / 57.29, r / 57.29, y / 57.29));
-                // deg to rad
-                } else if cycle_5 == 3 {
-                    // Vario
-                    let (alt, vel) = critical_section::with(|cs| {
-                        let rs = ROCKET_STATE.borrow_ref(cs);
-                        (rs.alt, rs.vel)
-                    });
-                    // println!("Sending Vario");
-                    packet_to_send = Some(crsf::payload_vario(alt, vel));
-                }
+            } else if cycle_5 == 0 {
+                let (lat, lon, spd, hdg, alt, sats) = critical_section::with(|cs| {
+                    let rs = ROCKET_STATE.borrow_ref(cs);
+                    (rs.lat, rs.lon, rs.vel, 0.0, rs.alt, rs.satellites)
+                });
+                packet_to_send = Some(crsf::payload_gps(lat, lon, spd, hdg, alt, sats));
+            } else if cycle_5 == 1 {
+                let (p, r, y) = critical_section::with(|cs| {
+                    let rs = ROCKET_STATE.borrow_ref(cs);
+                    (rs.gyro[0], rs.gyro[1], rs.gyro[2])
+                });
+                packet_to_send = Some(crsf::payload_attitude(p / 57.29, r / 57.29, y / 57.29));
+            } else if cycle_5 == 3 {
+                let (alt, vel) = critical_section::with(|cs| {
+                    let rs = ROCKET_STATE.borrow_ref(cs);
+                    (rs.alt, rs.vel)
+                });
+                packet_to_send = Some(crsf::payload_vario(alt, vel));
             }
 
             if let Some(pkt) = packet_to_send {
@@ -1114,7 +1068,7 @@ async fn crsf_tx_task() {
             }
         }
 
-        // Regular RC channels transmission
+        // ========== RC Channels (every tick = 50Hz) ==========
         let ctrl = critical_section::with(|cs| *CONTROL.borrow_ref(cs));
         let channels = build_rc_channels(&ctrl);
         let packet = crsf::build_channels_packet(&channels);
@@ -1125,10 +1079,9 @@ async fn crsf_tx_task() {
             }
         });
 
-        packet_count = packet_count.wrapping_add(1);
         if packet_count % 250 == 0 {
             let arm_status = if ctrl.arm_switch { "ARMED" } else { "DISARMED" };
-            println!("CRSF TX (50Hz) - {}", arm_status);
+            println!("CRSF TX (50Hz) - {} - pkts:{}", arm_status, packet_count);
         }
     }
 }

@@ -194,7 +194,7 @@ function connectSerial() {
             try {
                 const jsonStr = line.substring(5); // Remove 'DATA:' prefix
                 const telemetry = JSON.parse(jsonStr);
-                console.log(`📦 Telemetry: RSSI=${telemetry.rssi}dBm LQ=${telemetry.lq}% Alt=${telemetry.alt}m`);
+                console.log(`📦 Telemetry: RSSI=${telemetry.rssi}/${telemetry.drssi}dBm LQ=${telemetry.lq}% Alt=${telemetry.alt}m GPS=${telemetry.lat},${telemetry.lon}`);
                 broadcast({
                     type: 'telemetry',
                     data: telemetry,

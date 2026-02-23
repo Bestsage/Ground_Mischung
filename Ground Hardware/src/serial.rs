@@ -27,14 +27,17 @@ pub fn build_telemetry_json(
     satellites: u8,
     alt: f32,
     packet_count: u32,
-) -> String<256> {
+    lat: f32,
+    lon: f32,
+    temp: f32,
+    press: f32,
+) -> String<384> {
     let mut buf = String::new();
 
-    // Simple JSON format - easy to parse
-    // Added "drssi" for Downlink RSSI
+    // Complete JSON with all telemetry fields including GPS & environment
     let _ = core::fmt::write(&mut buf, format_args!(
-        "DATA:{{\"rssi\":{},\"drssi\":{},\"lq\":{},\"p\":{:.1},\"r\":{:.1},\"y\":{:.1},\"vario\":{:.2},\"batt\":{},\"sats\":{},\"alt\":{:.0},\"pkts\":{}}}",
-        uplink_rssi, downlink_rssi, link_quality, pitch, roll, yaw, vario, batt_mv, satellites, alt, packet_count
+        "DATA:{{\"rssi\":{},\"drssi\":{},\"lq\":{},\"p\":{:.1},\"r\":{:.1},\"y\":{:.1},\"vario\":{:.2},\"batt\":{},\"sats\":{},\"alt\":{:.1},\"pkts\":{},\"lat\":{:.6},\"lon\":{:.6},\"temp\":{:.1},\"press\":{:.1}}}",
+        uplink_rssi, downlink_rssi, link_quality, pitch, roll, yaw, vario, batt_mv, satellites, alt, packet_count, lat, lon, temp, press
     ));
 
     buf
