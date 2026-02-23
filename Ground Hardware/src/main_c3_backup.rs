@@ -1,13 +1,11 @@
-//! Ground Station Firmware for ESP32-S3 N16R8
-//! Dual-core: Core0 = CRSF radio, Core1 = Display + Encoder
-//! Dual ST7789 displays via shared SPI bus, PSRAM frame buffers
-//! Uses esp-hal 1.0.0-rc.0
+//! Ground Station Firmware for ESP32-C3 Super Mini
+//! Menu system with rotary encoder, CRSF to ELRS TX
+//! Uses esp-hal 0.21.1
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
-use alloc::boxed::Box;
 
 use core::cell::RefCell;
 use critical_section::Mutex;
@@ -17,18 +15,13 @@ use embedded_io::Write as EmbeddedWrite;
 use esp_backtrace as _;
 use esp_hal::{
     delay::Delay,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    spi::{
-        Mode as SpiMode,
-        master::{Config as SpiConfig, Spi},
-    },
-    time::Rate,
+    gpio::{Input, Level, Output, Pull},
+    prelude::*,
+    spi::master::Spi,
     timer::timg::TimerGroup,
-    uart::{Config as UartConfig, Uart},
+    uart::Uart,
 };
 use esp_println::println;
-
-esp_bootloader_esp_idf::esp_app_desc!();
 
 mod crsf;
 mod display;
@@ -124,12 +117,8 @@ static CONTROL: Mutex<RefCell<ControlState>> = Mutex::new(RefCell::new(ControlSt
 
 // UART stored in static for task access
 // Use RefCell inside Mutex to allow mutability
-type UartTxType = esp_hal::uart::UartTx<'static, esp_hal::Blocking>;
+type UartTxType = esp_hal::uart::UartTx<'static, esp_hal::peripherals::UART1, esp_hal::Async>;
 static UART_CRSF: Mutex<RefCell<Option<UartTxType>>> = Mutex::new(RefCell::new(None));
-
-// PSRAM Frame Buffers for dual displays (240x280 RGB565 = 134400 bytes each)
-pub const FRAME_BUF_SIZE: usize = 240 * 280;
-pub type FrameBuffer = Box<[embedded_graphics::pixelcolor::Rgb565; FRAME_BUF_SIZE]>;
 
 // Rocket State (Global)
 static ROCKET_STATE: Mutex<RefCell<RocketState>> = Mutex::new(RefCell::new(RocketState {
@@ -196,100 +185,71 @@ static MENU_STATE: Mutex<RefCell<MenuState>> = Mutex::new(RefCell::new(MenuState
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
-    println!("=== Ground Station ESP32-S3 N16R8 ===");
-    println!("[1/7] Peripherals init OK");
-
-    // Heap allocator: 72KB SRAM (ESP32-S3 has much more internal RAM than C3)
-    esp_alloc::heap_allocator!(size: 72 * 1024);
-    println!("[2/7] Heap allocator OK");
+    println!("=== Ground Station ESP32-C3 ===");
+    println!("[1/6] Peripherals init OK");
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
-    println!("[3/7] Embassy init OK");
+    println!("[2/6] Embassy init OK");
 
-    // ================================================================
-    // SPI2 for dual displays (Shared SPI bus)
-    // New ESP32-S3 pinout (avoids GPIO 0, 26-32 for PSRAM Octal):
-    //   SCL (Clock)  : GPIO12
-    //   SDA (MOSI)   : GPIO11
-    //   RES (Reset)   : GPIO14 (shared)
-    //   Screen 1 CS  : GPIO10, DC : GPIO9
-    //   Screen 2 CS  : GPIO13, DC : GPIO8
-    // ================================================================
-    let dc1 = Output::new(peripherals.GPIO9, Level::Low, OutputConfig::default());
-    let dc2 = Output::new(peripherals.GPIO8, Level::Low, OutputConfig::default());
-    let rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-    let cs1 = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
-    let cs2 = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
+    esp_alloc::heap_allocator!(32 * 1024);
+    println!("[3/6] Heap allocator OK");
 
-    // SPI2 with DMA
-    let spi_config = SpiConfig::default()
-        .with_frequency(Rate::from_mhz(80))
-        .with_mode(SpiMode::_0);
-    let spi2 = Spi::new(peripherals.SPI2, spi_config)
-        .unwrap()
-        .with_sck(peripherals.GPIO12)
-        .with_mosi(peripherals.GPIO11);
-    println!("[4/7] SPI2 init OK");
+    let io = esp_hal::gpio::Io::new(peripherals.GPIO, peripherals.IO_MUX);
 
-    // Wrap shared resources in RefCell for display driver
+    // SPI2 for display (Shared SPI) - Initialize BEFORE UART to avoid timing conflicts
+    let dc = Output::new(io.pins.gpio21, Level::Low);
+    let rst = Output::new(io.pins.gpio20, Level::High);
+    let cs1 = Output::new(io.pins.gpio10, Level::High);
+    let cs2 = Output::new(io.pins.gpio4, Level::High); // Second screen CS
+
+    let spi2 = Spi::new(peripherals.SPI2, 80.MHz(), esp_hal::spi::SpiMode::Mode0)
+        .with_sck(io.pins.gpio2)
+        .with_mosi(io.pins.gpio3);
+    println!("[4/6] SPI2 init OK");
+
+    // Wrap shared resources in RefCell
     let spi_bus = RefCell::new(spi2);
-    let dc1_cell = RefCell::new(dc1);
-    let dc2_cell = RefCell::new(dc2);
+    let dc_bus = RefCell::new(dc);
     let rst_bus = RefCell::new(rst);
 
     let mut delay = Delay::new();
     let mut display_driver =
-        display::Driver::new(&spi_bus, &dc1_cell, &dc2_cell, &rst_bus, cs1, cs2, &mut delay);
-    println!("[5/7] Dual Display init OK");
+        display::Driver::new(&spi_bus, &dc_bus, &rst_bus, cs1, cs2, &mut delay);
+    println!("[5/6] Dual Display init OK");
 
-    // ================================================================
-    // UART1 for CRSF to ELRS TX
-    //   TX : GPIO17
-    //   RX : GPIO18
-    // ================================================================
-    let uart_config = UartConfig::default().with_baudrate(400_000);
-    let uart1 = Uart::new(peripherals.UART1, uart_config)
-        .unwrap()
-        .with_rx(peripherals.GPIO18)
-        .with_tx(peripherals.GPIO17)
-        .into_async();
+    // UART1 for CRSF to ELRS TX - Initialize AFTER displays
+    use esp_hal::uart::config::Config as UartConfig;
+    let uart_config = UartConfig::default().baudrate(400_000);
+    let uart1 =
+        Uart::new_async_with_config(peripherals.UART1, uart_config, io.pins.gpio6, io.pins.gpio7)
+            .unwrap();
 
     let (rx, tx) = uart1.split();
-    // Store TX as Blocking (Async is !Send, can't live in static Mutex)
-    let tx_blocking = tx.into_blocking();
     critical_section::with(|cs| {
-        UART_CRSF.borrow_ref_mut(cs).replace(tx_blocking);
+        UART_CRSF.borrow_ref_mut(cs).replace(tx);
     });
-    println!("[6/7] UART1 CRSF init OK (TX:GPIO17 RX:GPIO18)");
+    println!("[6/6] UART1 CRSF init OK");
 
-    // ================================================================
-    // Rotary encoder
-    //   Channel A : GPIO4
-    //   Channel B : GPIO5
-    //   Button    : GPIO6
-    // ================================================================
-    let enc_a = Input::new(peripherals.GPIO4, InputConfig::default().with_pull(Pull::Up));
-    let enc_b = Input::new(peripherals.GPIO5, InputConfig::default().with_pull(Pull::Up));
-    let enc_btn = Input::new(peripherals.GPIO6, InputConfig::default().with_pull(Pull::Up));
+    // Rotary encoder pins
+    // GPIO1, GPIO5 for rotation signals, GPIO0 for button
+    let enc_a = Input::new(io.pins.gpio1, Pull::Up);
+    let enc_b = Input::new(io.pins.gpio5, Pull::Up);
+    let enc_btn = Input::new(io.pins.gpio0, Pull::Up);
 
-    println!("[7/7] Encoder init OK (A:GPIO4 B:GPIO5 BTN:GPIO6)");
+    // NOTE: ARM switch moved to software control via menu
+    // let pin_arm = Input::new(io.pins.gpio18, Pull::Up);
 
     println!("");
-    println!("Ground Station ESP32-S3 Started!");
-    println!("Dual-core: Core0=CRSF, Core1=Display+Encoder");
-    println!("Dual ST7789 displays, PSRAM frame buffers");
+    println!("Ground Station Started!");
+    println!("Encoder: GPIO1/5, Button: GPIO0");
+    println!("CRSF TX: GPIO7");
     println!("");
 
-    // ================================================================
-    // DUAL CORE TASK DISTRIBUTION
-    // Core 0 (current / PRO_CPU): CRSF TX + RX (radio priority)
-    // Core 1 (APP_CPU): Display loop + Encoder
-    // ================================================================
-    // Spawn CRSF tasks on Core 0 (current core = main)
+    // Spawn tasks
     spawner.spawn(crsf_tx_task()).unwrap();
-    spawner.spawn(crsf_rx_task(rx)).unwrap();
     spawner.spawn(encoder_task(enc_a, enc_b, enc_btn)).unwrap();
+    spawner.spawn(crsf_rx_task(rx)).unwrap();
 
     let start_time = Instant::now();
     let mut frame_counter: u32 = 0;
@@ -376,9 +336,10 @@ async fn main(spawner: Spawner) {
 /// Rx Task
 #[embassy_executor::task]
 async fn crsf_rx_task(
-    mut rx: esp_hal::uart::UartRx<'static, esp_hal::Async>,
+    mut rx: esp_hal::uart::UartRx<'static, esp_hal::peripherals::UART1, esp_hal::Async>,
 ) {
     use embassy_futures::select::{select, Either};
+    use embedded_io_async::Read;
 
     // Wait for ELRS module to stabilize before starting RX
     println!("CRSF RX: Waiting 500ms for ELRS module to stabilize...");
@@ -389,7 +350,7 @@ async fn crsf_rx_task(
     let mut drained = 0usize;
     loop {
         let drain_result = select(
-            rx.read_async(&mut drain_buf),
+            rx.read(&mut drain_buf),
             Timer::after(Duration::from_millis(50)),
         )
         .await;
@@ -412,11 +373,11 @@ async fn crsf_rx_task(
     let mut heartbeat: u32 = 0;
     let mut bytes_since_last_packet: u32 = 0;
 
-    println!("CRSF RX task started - GPIO18 RX ready");
+    println!("CRSF RX task started - GPIO6 RX ready");
 
     loop {
         // Use select to add a timeout/heartbeat - shorter timeout for responsiveness
-        let read_future = rx.read_async(&mut buf);
+        let read_future = rx.read(&mut buf);
         let timeout_future = Timer::after(Duration::from_millis(500));
 
         match select(read_future, timeout_future).await {
@@ -723,7 +684,7 @@ async fn crsf_rx_task(
                 heartbeat = heartbeat.wrapping_add(1);
                 if heartbeat <= 5 {
                     println!(
-                        "RX heartbeat #{}: NO DATA on GPIO18 (bytes so far: {})",
+                        "RX heartbeat #{}: NO DATA on GPIO6 (bytes so far: {})",
                         heartbeat, byte_count
                     );
                 }
@@ -849,7 +810,7 @@ async fn crsf_tx_task() {
     let mut packet_count: u32 = 0;
     let mut config_send_counter: u8 = 0;
 
-    println!("CRSF TX task started (50Hz) on Core 0");
+    println!("CRSF TX task started (50Hz)");
 
     loop {
         ticker.next().await;

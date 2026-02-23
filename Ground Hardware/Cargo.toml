@@ -4,24 +4,25 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# ESP HAL & Backtrace - Downgrade to 0.21.x to fix interrupt crash bug in 0.22.0
-esp-hal = { version = "0.21.1", features = ["esp32c3"] }
-esp-backtrace = { version = "0.14.0", features = ["esp32c3", "exception-handler", "panic-handler", "println"] }
-esp-println = { version = "0.11.0", features = ["esp32c3", "log"] }
-esp-alloc = { version = "0.4.0" }
-esp-hal-embassy = { version = "0.4.0", features = ["esp32c3"] }
+# ESP HAL & Backtrace - ESP32-S3 (N16R8: 16MB Flash, 8MB PSRAM Octal)
+# esp-hal 1.0.0-rc.0: "unstable" needed for UART split, embedded-io traits, DMA
+esp-hal = { version = "=1.0.0-rc.0", features = ["esp32s3", "unstable"] }
+esp-backtrace = { version = "0.16.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-println = { version = "0.14.0", default-features = false, features = ["esp32s3", "log-04", "jtag-serial", "colors", "critical-section"] }
+esp-alloc = { version = "0.8.0" }
+esp-hal-embassy = { version = "0.9.1", features = ["esp32s3"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3"] }
 
-# Async IO
+# Async IO (0.6 matches esp-hal 1.0.0-rc.0 trait implementations)
 embedded-io = "0.6.1"
 embedded-io-async = "0.6.1"
-embedded-hal = "1.0.0" 
-embedded-hal-bus = "0.1.0"
+embedded-hal = "1.0.0"
+embedded-hal-bus = "0.2.0"
 
-# Embassy Async
-embassy-executor = { version = "0.6.0", features = ["task-arena-size-12288", "executor-thread"] }
-# Added tick-hz and generic-queue features for timer driver compatibility
-embassy-time = { version = "0.3.2", features = ["tick-hz-1_000_000", "generic-queue-8"] }
-embassy-sync = { version = "0.6.0" }
+# Embassy Async (versions matching esp-hal-embassy 0.9.1 requirements)
+embassy-executor = { version = "0.7.0", features = ["task-arena-size-12288", "executor-thread"] }
+embassy-time = { version = "0.4.0" }
+embassy-sync = { version = "0.6.2" }
 embassy-futures = { version = "0.1.1" }
 
 # Graphics & UI
@@ -49,7 +50,7 @@ debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'
-opt-level = 's'
+opt-level = 3
 overflow-checks = false
 
 [[bin]]

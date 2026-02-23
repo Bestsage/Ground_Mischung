@@ -2,9 +2,17 @@
 //! Screen 1: ELRS Sensors (telemetry data)
 //! Screen 2: ELRS Config (tlm_ratio, packet_rate, tx_power)
 //! Screen 3: Settings (theme, uptime)
+//!
+//! ESP32-S3: Alt history can be expanded via PSRAM external buffers.
+//! The `alt_history` here is a compact graph buffer for display rendering.
+//! For full flight logging, use the PSRAM-backed `FlightHistory` in main.rs.
 
-// Graph history buffer size
-pub const GRAPH_WIDTH: usize = 120;
+// Graph history buffer size (display pixel width)
+pub const GRAPH_WIDTH: usize = 240;
+
+// Extended PSRAM flight history buffer (allocated in PSRAM via alloc::vec)
+// At 10Hz sampling, 32768 samples = ~54 minutes of flight data
+pub const FLIGHT_HISTORY_SIZE: usize = 32768;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Screen {

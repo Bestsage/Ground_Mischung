@@ -9,7 +9,11 @@ use embedded_graphics::{
 };
 use embedded_hal::digital::{ErrorType, OutputPin};
 use embedded_hal_bus::spi::RefCellDevice;
-use esp_hal::{delay::Delay, gpio::Output, spi::master::Spi, spi::FullDuplexMode};
+use esp_hal::{
+    delay::Delay,
+    gpio::Output,
+    spi::master::Spi,
+};
 use heapless::String;
 use mipidsi::{
     models::ST7789,
@@ -44,13 +48,13 @@ impl<'a, P: OutputPin> OutputPin for SharedPin<'a, P> {
     }
 }
 
-type SpiType<'d> = Spi<'d, esp_hal::peripherals::SPI2, FullDuplexMode>;
+type SpiType<'d> = Spi<'d, esp_hal::Blocking>;
 
-// Use RefCellDevice for shared SPI, and SharedPin for DC. RST is manual.
+// Each screen has its own DC pin now (separate GPIO9 and GPIO8)
+// Use RefCellDevice for shared SPI bus, SharedPin for per-screen DC.
 type DisplayType<'d> = mipidsi::Display<
     SPIInterface<RefCellDevice<'d, SpiType<'d>, Output<'d>, Delay>, SharedPin<'d, Output<'d>>>,
     ST7789,
-    // Default ResetPin is our local no-op
     NoResetPin,
 >;
 
@@ -85,16 +89,17 @@ pub struct Driver<'d> {
 impl<'d> Driver<'d> {
     pub fn new(
         spi_bus: &'d RefCell<SpiType<'d>>,
-        dc_bus: &'d RefCell<Output<'d>>,
+        dc1_bus: &'d RefCell<Output<'d>>,
+        dc2_bus: &'d RefCell<Output<'d>>,
         rst_bus: &'d RefCell<Output<'d>>,
         cs1: Output<'d>,
         cs2: Output<'d>,
         delay: &mut Delay,
     ) -> Self {
-        // Create SharedPins for DC only
-        let dc1 = SharedPin { pin: dc_bus };
-        let dc2 = SharedPin { pin: dc_bus };
-        // rst is handled manually below
+        // Separate DC pins for each screen (GPIO9 for Screen1, GPIO8 for Screen2)
+        let dc1 = SharedPin { pin: dc1_bus };
+        let dc2 = SharedPin { pin: dc2_bus };
+        // rst is handled manually below (shared GPIO14)
 
         // Manual Reset for both displays (since they share RST)
         let _ = rst_bus.borrow_mut().set_low();
@@ -102,28 +107,28 @@ impl<'d> Driver<'d> {
         let _ = rst_bus.borrow_mut().set_high();
         delay.delay_ms(150); // Wait for restart
 
-        // Display 1 (CS1)
-        let device1 = RefCellDevice::new(spi_bus, cs1, Delay::new());
+        // Display 1 (CS1=GPIO10, DC1=GPIO9)
+        let device1 = RefCellDevice::new(spi_bus, cs1, Delay::new()).unwrap();
         let di1 = SPIInterface::new(device1, dc1);
         let mut display1 = Builder::new(ST7789, di1)
             .display_size(240, 280)
             .display_offset(0, 20)
             .orientation(Orientation::default())
             .invert_colors(ColorInversion::Inverted)
-            .reset_pin(NoResetPin) // Use our local no-op pin
+            .reset_pin(NoResetPin)
             .init(delay)
             .unwrap();
         let _ = display1.clear(BG_COLOR);
 
-        // Display 2 (CS2)
-        let device2 = RefCellDevice::new(spi_bus, cs2, Delay::new());
+        // Display 2 (CS2=GPIO13, DC2=GPIO8)
+        let device2 = RefCellDevice::new(spi_bus, cs2, Delay::new()).unwrap();
         let di2 = SPIInterface::new(device2, dc2);
         let mut display2 = Builder::new(ST7789, di2)
             .display_size(240, 280)
             .display_offset(0, 20)
             .orientation(Orientation::default())
             .invert_colors(ColorInversion::Inverted)
-            .reset_pin(NoResetPin) // Use our local no-op pin
+            .reset_pin(NoResetPin)
             .init(delay)
             .unwrap();
         let _ = display2.clear(BG_COLOR);
@@ -579,7 +584,7 @@ impl<'d> Driver<'d> {
 
         // Version info
         let ver_style = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
-        let _ = Text::new("Ground Station v1.1", Point::new(50, 200), ver_style).draw(target);
-        let _ = Text::new("ESP32-C3 + ELRS", Point::new(60, 215), ver_style).draw(target);
+        let _ = Text::new("Ground Station v2.0", Point::new(50, 200), ver_style).draw(target);
+        let _ = Text::new("ESP32-S3 + ELRS", Point::new(60, 215), ver_style).draw(target);
     }
 }

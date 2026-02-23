@@ -35,6 +35,7 @@ class RocketTelemetry {
         this.ws = null;
         this.wsReconnectInterval = null;
         this.isConnected = false;
+        this.serialMonitoring = true;
 
         // 3D Scenes (mini and full)
         this.scene = null;
@@ -1164,10 +1165,17 @@ class RocketTelemetry {
     handleWebSocketMessage(data) {
         switch (data.type) {
             case 'status':
+                if (typeof data.monitoring === 'boolean') {
+                    this.serialMonitoring = data.monitoring;
+                }
                 this.isConnected = data.connected;
                 this.updateConnectionUI(data.connected);
                 if (data.connected) {
                     this.addLog('Serial port connected', 'success');
+                } else if (this.serialMonitoring) {
+                    this.addLog('Serial port disconnected', 'warning');
+                } else {
+                    this.addLog('Serial monitoring paused', 'warning');
                 }
                 if (data.error) {
                     this.addLog(`Error: ${data.error}`, 'error');
@@ -1305,7 +1313,10 @@ class RocketTelemetry {
             textEl.textContent = connected ? 'Connected' : 'Disconnected';
         }
         if (connectBtn) {
-            connectBtn.textContent = connected ? '🔄 Reconnect' : '🔌 Connect';
+            const wsReady = this.ws && this.ws.readyState === WebSocket.OPEN;
+            connectBtn.textContent = wsReady
+                ? (this.serialMonitoring ? '⏹ Stop Serial' : '▶️ Start Serial')
+                : '🔌 Connect';
             connectBtn.classList.toggle('connected', connected);
         }
     }
@@ -1315,8 +1326,13 @@ class RocketTelemetry {
      */
     toggleConnection() {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ type: 'reconnect' }));
-            this.addLog('Requesting reconnection...', 'info');
+            if (this.serialMonitoring) {
+                this.ws.send(JSON.stringify({ type: 'serial_stop' }));
+                this.addLog('Stopping serial monitoring...', 'info');
+            } else {
+                this.ws.send(JSON.stringify({ type: 'serial_start' }));
+                this.addLog('Starting serial monitoring...', 'info');
+            }
         } else {
             this.connectWebSocket();
         }

@@ -58,7 +58,11 @@ wss.on('connection', (ws) => {
     clients.push(ws);
 
     // Send connection status
-    ws.send(JSON.stringify({ type: 'status', connected: serialConnected }));
+    ws.send(JSON.stringify({
+        type: 'status',
+        connected: serialConnected,
+        monitoring: serialMonitoringEnabled
+    }));
 
     ws.on('close', () => {
         console.log('📡 WebSocket client disconnected');
@@ -70,6 +74,10 @@ wss.on('connection', (ws) => {
             const data = JSON.parse(message);
             if (data.type === 'reconnect') {
                 reconnectSerial();
+            } else if (data.type === 'serial_stop') {
+                stopSerialMonitoring();
+            } else if (data.type === 'serial_start') {
+                startSerialMonitoring();
             } else if (data.type === 'command') {
                 // Forward command to serial port
                 sendCommand(data.command, data.value);
@@ -112,11 +120,44 @@ console.log(`📡 WebSocket Server running on ws://localhost:${WS_PORT}`);
 let serialPort = null;
 let parser = null;
 let serialConnected = false;
+let serialMonitoringEnabled = true;
 let reconnectAttempts = 0;
+let reconnectTimer = null;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY = 3000;
 
+function broadcastStatus(error = null) {
+    const payload = {
+        type: 'status',
+        connected: serialConnected,
+        monitoring: serialMonitoringEnabled
+    };
+
+    if (error) {
+        payload.error = error;
+    }
+
+    broadcast(payload);
+}
+
+function clearReconnectTimer() {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+}
+
 function connectSerial() {
+    if (!serialMonitoringEnabled) {
+        console.log('⏸️ Serial monitoring is paused, skipping connection attempt');
+        return;
+    }
+
+    if (serialPort && serialPort.isOpen) {
+        console.log('ℹ️ Serial port already open');
+        return;
+    }
+
     console.log(`🔌 Attempting to connect to ${SERIAL_PORT} at ${BAUD_RATE} baud...`);
 
     serialPort = new SerialPort({
@@ -132,7 +173,7 @@ function connectSerial() {
         if (err) {
             console.error(`❌ Error opening serial port: ${err.message}`);
             serialConnected = false;
-            broadcast({ type: 'status', connected: false, error: err.message });
+            broadcastStatus(err.message);
             scheduleReconnect();
             return;
         }
@@ -140,7 +181,8 @@ function connectSerial() {
         console.log(`✅ Serial port ${SERIAL_PORT} opened successfully`);
         serialConnected = true;
         reconnectAttempts = 0;
-        broadcast({ type: 'status', connected: true });
+        clearReconnectTimer();
+        broadcastStatus();
     });
 
     // Handle incoming data
@@ -193,23 +235,34 @@ function connectSerial() {
     serialPort.on('error', (err) => {
         console.error(`❌ Serial port error: ${err.message}`);
         serialConnected = false;
-        broadcast({ type: 'status', connected: false, error: err.message });
+        broadcastStatus(err.message);
     });
 
     // Handle close
     serialPort.on('close', () => {
         console.log('🔌 Serial port closed');
         serialConnected = false;
-        broadcast({ type: 'status', connected: false });
+        broadcastStatus();
         scheduleReconnect();
     });
 }
 
 function scheduleReconnect() {
+    if (!serialMonitoringEnabled) {
+        return;
+    }
+
+    if (reconnectTimer) {
+        return;
+    }
+
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         reconnectAttempts++;
         console.log(`🔄 Reconnecting in ${RECONNECT_DELAY / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-        setTimeout(connectSerial, RECONNECT_DELAY);
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connectSerial();
+        }, RECONNECT_DELAY);
     } else {
         console.log('❌ Max reconnect attempts reached. Use manual reconnect.');
     }
@@ -217,7 +270,10 @@ function scheduleReconnect() {
 
 function reconnectSerial() {
     console.log('🔄 Manual reconnect requested');
+    serialMonitoringEnabled = true;
     reconnectAttempts = 0;
+    clearReconnectTimer();
+    broadcastStatus();
 
     if (serialPort && serialPort.isOpen) {
         serialPort.close(() => {
@@ -226,6 +282,57 @@ function reconnectSerial() {
     } else {
         connectSerial();
     }
+}
+
+function stopSerialMonitoring() {
+    if (!serialMonitoringEnabled) {
+        console.log('⏸️ Serial monitoring already paused');
+        return;
+    }
+
+    console.log('⏹️ Stopping serial monitoring');
+    serialMonitoringEnabled = false;
+    reconnectAttempts = 0;
+    clearReconnectTimer();
+
+    if (parser) {
+        parser.removeAllListeners('data');
+        parser = null;
+    }
+
+    if (serialPort) {
+        serialPort.removeAllListeners('error');
+        serialPort.removeAllListeners('close');
+
+        if (serialPort.isOpen) {
+            serialPort.close(() => {
+                serialConnected = false;
+                broadcastStatus();
+            });
+        } else {
+            serialConnected = false;
+            broadcastStatus();
+        }
+    } else {
+        serialConnected = false;
+        broadcastStatus();
+    }
+}
+
+function startSerialMonitoring() {
+    if (serialMonitoringEnabled) {
+        console.log('▶️ Serial monitoring already running');
+        reconnectAttempts = 0;
+        connectSerial();
+        return;
+    }
+
+    console.log('▶️ Starting serial monitoring');
+    serialMonitoringEnabled = true;
+    reconnectAttempts = 0;
+    clearReconnectTimer();
+    broadcastStatus();
+    connectSerial();
 }
 
 // List available serial ports
@@ -254,6 +361,8 @@ start();
 // Graceful shutdown
 process.on('SIGINT', () => {
     console.log('\n👋 Shutting down...');
+
+    clearReconnectTimer();
 
     if (serialPort && serialPort.isOpen) {
         serialPort.close();
