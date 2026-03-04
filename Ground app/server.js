@@ -210,7 +210,7 @@ function connectSerial() {
             try {
                 const jsonStr = line.substring(4); // Remove 'CFG:' prefix
                 const config = JSON.parse(jsonStr);
-                console.log(`⚙️ Config: TLM=${config.tlm} Rate=${config.rate} PWR=${config.pwr}%`);
+                console.log(`⚙️ Config: TLM=${config.tlm} Rate=${config.rate} PWR=idx${config.pwr}`);
                 broadcast({
                     type: 'config',
                     data: config,
@@ -218,6 +218,21 @@ function connectSerial() {
                 });
             } catch (e) {
                 console.error(`❌ Config JSON parse error: ${e.message}`);
+            }
+        }
+        // Check for ELRS discovered params: ELRS:{"pwr":[10,25,50,100],...}
+        else if (line.startsWith('ELRS:')) {
+            try {
+                const jsonStr = line.substring(5); // Remove 'ELRS:' prefix
+                const elrsParams = JSON.parse(jsonStr);
+                console.log(`📻 ELRS Params: ${elrsParams.pwr_n} power levels, current idx=${elrsParams.pwr_i}`);
+                broadcast({
+                    type: 'elrs_params',
+                    data: elrsParams,
+                    timestamp: Date.now()
+                });
+            } catch (e) {
+                console.error(`❌ ELRS JSON parse error: ${e.message}`);
             }
         }
         // Debug/log other data

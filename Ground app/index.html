@@ -70,126 +70,114 @@
                 </div>
             </header>
 
-            <!-- Page: Dashboard -->
+            <!-- Page: Dashboard - Debug Values View -->
             <div class="page active" id="page-dashboard">
-                <div class="dashboard-grid">
-                    <!-- Quick Stats -->
-                    <div class="stat-card altitude-card">
-                        <div class="stat-icon">🏔️</div>
-                        <div class="stat-info">
-                            <span class="stat-value" id="altitude">--</span>
-                            <span class="stat-label">Altitude (m)</span>
-                        </div>
-                    </div>
-                    <div class="stat-card velocity-card">
-                        <div class="stat-icon">⚡</div>
-                        <div class="stat-info">
-                            <span class="stat-value" id="velocity">--</span>
-                            <span class="stat-label">Velocity (m/s)</span>
-                        </div>
-                    </div>
-                    <div class="stat-card temp-card">
-                        <div class="stat-icon">🌡️</div>
-                        <div class="stat-info">
-                            <span class="stat-value" id="temperature">--</span>
-                            <span class="stat-label">Temperature (°C)</span>
-                        </div>
-                    </div>
-                    <div class="stat-card pressure-card">
-                        <div class="stat-icon">💨</div>
-                        <div class="stat-info">
-                            <span class="stat-value" id="pressure">--</span>
-                            <span class="stat-label">Pressure (kPa)</span>
-                        </div>
-                    </div>
-
-                    <!-- Mini 3D View -->
-                    <div class="card mini-3d-card">
-                        <h3>🚀 Attitude</h3>
-                        <div id="rocket3DContainer"></div>
-                        <div class="attitude-values">
-                            <span>R: <strong id="rollValue">0°</strong></span>
-                            <span>P: <strong id="pitchValue">0°</strong></span>
-                            <span>Y: <strong id="yawValue">0°</strong></span>
-                        </div>
-                    </div>
-
-                    <!-- Mini Map -->
-                    <div class="card mini-map-card">
-                        <h3>📍 Location</h3>
-                        <div id="miniMap"></div>
-                        <div class="gps-values">
-                            <span>Lat: <strong id="latitude">--</strong></span>
-                            <span>Lon: <strong id="longitude">--</strong></span>
-                            <span>Sats: <strong id="satellites">--</strong></span>
-                        </div>
-                    </div>
-
-                    <!-- IMU Data -->
-                    <div class="card imu-card">
-                        <h3>📊 IMU Data</h3>
-                        <div class="imu-grid">
-                            <div class="imu-section">
-                                <h4>Attitude (°)</h4>
-                                <div class="imu-values">
-                                    <span class="axis-x">X: <strong id="gyroX">--</strong></span>
-                                    <span class="axis-y">Y: <strong id="gyroY">--</strong></span>
-                                    <span class="axis-z">Z: <strong id="gyroZ">--</strong></span>
-                                </div>
+                <div class="debug-grid">
+                    <!-- RF Link -->
+                    <div class="card debug-card">
+                        <h3>📡 RF Link</h3>
+                        <div class="debug-values">
+                            <div class="debug-row">
+                                <span class="debug-label">UP RSSI</span>
+                                <span class="debug-val" id="signalStrength">--</span>
+                                <span class="debug-unit">dBm</span>
                             </div>
-                            <div class="imu-section">
-                                <h4>Accelerometer (m/s²)</h4>
-                                <div class="imu-values">
-                                    <span class="axis-x">X: <strong id="accelX">--</strong></span>
-                                    <span class="axis-y">Y: <strong id="accelY">--</strong></span>
-                                    <span class="axis-z">Z: <strong id="accelZ">--</strong></span>
-                                </div>
+                            <div class="debug-row">
+                                <span class="debug-label">DN RSSI</span>
+                                <span class="debug-val" id="downlinkRssi">--</span>
+                                <span class="debug-unit">dBm</span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">LQ</span>
+                                <span class="debug-val" id="linkQuality">--</span>
+                                <span class="debug-unit">%</span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Packets</span>
+                                <span class="debug-val" id="packetCount">--</span>
+                                <span class="debug-unit">rx</span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Battery</span>
+                                <span class="debug-val" id="voltage">--</span>
+                                <span class="debug-unit">mV</span>
                             </div>
                         </div>
                     </div>
 
-                    <!-- Power & Signal Status -->
-                    <div class="card power-card">
-                        <h3>📡 RF Link Status</h3>
-                        <div class="power-grid">
-                            <div class="power-item">
-                                <span class="power-label">RSSI</span>
-                                <span class="power-value" id="signalStrength">--</span>
-                                <span class="power-unit">dBm</span>
-                                <div class="signal-bars" id="signalBars">
-                                    <div class="bar"></div>
-                                    <div class="bar"></div>
-                                    <div class="bar"></div>
-                                    <div class="bar"></div>
-                                    <div class="bar"></div>
-                                </div>
+                    <!-- GPS -->
+                    <div class="card debug-card">
+                        <h3>📍 GPS</h3>
+                        <div class="debug-values">
+                            <div class="debug-row">
+                                <span class="debug-label">Lat</span>
+                                <span class="debug-val" id="latitude">--</span>
+                                <span class="debug-unit">°</span>
                             </div>
-                            <div class="power-item">
-                                <span class="power-label">Link Quality</span>
-                                <span class="power-value" id="linkQuality">--</span>
-                                <span class="power-unit">%</span>
-                                <div class="progress-bar">
-                                    <div class="progress lq-bar" id="lqBar"></div>
-                                </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Lon</span>
+                                <span class="debug-val" id="longitude">--</span>
+                                <span class="debug-unit">°</span>
                             </div>
-                            <div class="power-item">
-                                <span class="power-label">Battery</span>
-                                <span class="power-value" id="voltage">--</span>
-                                <span class="power-unit">mV</span>
-                                <div class="progress-bar">
-                                    <div class="progress" id="voltageBar"></div>
-                                </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Alt</span>
+                                <span class="debug-val" id="altitude">--</span>
+                                <span class="debug-unit">m</span>
                             </div>
-                            <div class="power-item">
-                                <span class="power-label">Packets</span>
-                                <span class="power-value" id="packetCount">--</span>
-                                <span class="power-unit">rx</span>
+                            <div class="debug-row">
+                                <span class="debug-label">Sats</span>
+                                <span class="debug-val" id="satellites">--</span>
+                                <span class="debug-unit"></span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Vario</span>
+                                <span class="debug-val" id="velocity">--</span>
+                                <span class="debug-unit">m/s</span>
                             </div>
                         </div>
                     </div>
 
-                    <!-- ELRS Configuration Panel -->
-                    <div class="card elrs-card">
+                    <!-- Environment -->
+                    <div class="card debug-card">
+                        <h3>🌡️ Environment</h3>
+                        <div class="debug-values">
+                            <div class="debug-row">
+                                <span class="debug-label">Temp</span>
+                                <span class="debug-val" id="temperature">--</span>
+                                <span class="debug-unit">°C</span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Press</span>
+                                <span class="debug-val" id="pressure">--</span>
+                                <span class="debug-unit">hPa</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- IMU / Attitude -->
+                    <div class="card debug-card">
+                        <h3>🎯 Attitude</h3>
+                        <div class="debug-values">
+                            <div class="debug-row">
+                                <span class="debug-label">Pitch</span>
+                                <span class="debug-val" id="gyroX">--</span>
+                                <span class="debug-unit">°</span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Roll</span>
+                                <span class="debug-val" id="gyroY">--</span>
+                                <span class="debug-unit">°</span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Yaw</span>
+                                <span class="debug-val" id="gyroZ">--</span>
+                                <span class="debug-unit">°</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ELRS Config -->
+                    <div class="card debug-card elrs-card">
                         <h3>⚙️ ELRS Config</h3>
                         <div class="elrs-controls">
                             <div class="control-row">
@@ -209,27 +197,63 @@
                                 <label>Packet Rate</label>
                                 <select id="packetRate" class="elrs-select">
                                     <option value="0">25Hz</option>
-                                    <option value="1" selected>50Hz</option>
+                                    <option value="1">50Hz</option>
                                     <option value="2">100Hz</option>
                                     <option value="3">150Hz</option>
                                     <option value="4">200Hz</option>
                                     <option value="5">250Hz</option>
-                                    <option value="6">500Hz</option>
+                                    <option value="6" selected>500Hz</option>
                                 </select>
                             </div>
                             <div class="control-row">
                                 <label>TX Power</label>
                                 <select id="txPower" class="elrs-select">
-                                    <option value="25">25%</option>
-                                    <option value="50">50%</option>
-                                    <option value="75">75%</option>
-                                    <option value="100" selected>100%</option>
+                                    <option value="0">10 mW</option>
+                                    <option value="1">25 mW</option>
+                                    <option value="2">50 mW</option>
+                                    <option value="3" selected>100 mW</option>
+                                    <option value="4">250 mW</option>
+                                    <option value="5">500 mW</option>
+                                    <option value="6">1000 mW</option>
+                                    <option value="7">2000 mW</option>
                                 </select>
                             </div>
                             <button id="applyElrsBtn" class="btn btn-primary btn-full">Apply Config</button>
                             <div class="control-row arm-control">
                                 <label>ARM Switch</label>
                                 <button id="armBtn" class="btn btn-danger arm-btn">🔒 SAFE</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ELRS Discovery Status -->
+                    <div class="card debug-card">
+                        <h3>📻 ELRS Status</h3>
+                        <div class="debug-values">
+                            <div class="debug-row">
+                                <span class="debug-label">Discovery</span>
+                                <span class="debug-val" id="elrsDiscovery">pending</span>
+                                <span class="debug-unit"></span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Power Lvls</span>
+                                <span class="debug-val" id="elrsPowerLevels">--</span>
+                                <span class="debug-unit"></span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">PWR idx</span>
+                                <span class="debug-val" id="elrsPwrIdx">--</span>
+                                <span class="debug-unit"></span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">Rate idx</span>
+                                <span class="debug-val" id="elrsRateIdx">--</span>
+                                <span class="debug-unit"></span>
+                            </div>
+                            <div class="debug-row">
+                                <span class="debug-label">TLM idx</span>
+                                <span class="debug-val" id="elrsTlmIdx">--</span>
+                                <span class="debug-unit"></span>
                             </div>
                         </div>
                     </div>

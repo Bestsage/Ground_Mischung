@@ -1,7 +1,6 @@
 //! Ground Station Firmware for ESP32-S3 N16R8
-//! Dual-core: Core0 = CRSF radio, Core1 = Display + Encoder
-//! Dual ST7789 displays via shared SPI bus, PSRAM frame buffers
-//! Uses esp-hal 1.0.0-rc.0
+//! Single ST7789 display (CS=GPIO13, DC=GPIO8, RST=GPIO14)
+//! Core0: CRSF radio tasks | Main loop: display + serial out
 
 #![no_std]
 #![no_main]
@@ -17,7 +16,7 @@ use embedded_io::Write as EmbeddedWrite;
 use esp_backtrace as _;
 use esp_hal::{
     delay::Delay,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Level, Output, OutputConfig},
     spi::{
         Mode as SpiMode,
         master::{Config as SpiConfig, Spi},
@@ -44,8 +43,8 @@ pub struct RocketState {
     pub press: f32,
     pub alt: f32,
     pub vel: f32,
-    pub lon: f32,
-    pub lat: f32,
+    pub lon: i32,  // raw CRSF units: deg * 1e7 (i32 to avoid f32 precision loss)
+    pub lat: i32,  // raw CRSF units: deg * 1e7
     pub batt_voltage: u32,
     pub satellites: u8,
     pub gyro: [f32; 3],
@@ -72,8 +71,8 @@ impl Default for RocketState {
             press: 1013.25,
             alt: 0.0,
             vel: 0.0,
-            lon: 2.3522, // Paris
-            lat: 48.8566,
+            lon: 23522000, // Paris (2.3522° * 1e7)
+            lat: 488566000, // Paris (48.8566° * 1e7)
             batt_voltage: 3850,
             satellites: 0,
             gyro: [0.0; 3],
@@ -131,14 +130,31 @@ static UART_CRSF: Mutex<RefCell<Option<UartTxType>>> = Mutex::new(RefCell::new(N
 pub const FRAME_BUF_SIZE: usize = 240 * 280;
 pub type FrameBuffer = Box<[embedded_graphics::pixelcolor::Rgb565; FRAME_BUF_SIZE]>;
 
+// ELRS Discovered Configuration (populated at boot via CRSF parameter discovery)
+static ELRS_CONFIG: Mutex<RefCell<crsf::ElrsConfig>> = Mutex::new(RefCell::new(crsf::ElrsConfig {
+    device_found: false,
+    discovery_done: false,
+    total_params: 0,
+    power_param_num: 0,
+    power_levels_mw: [0; 12],
+    power_count: 0,
+    power_current_idx: 0,
+    rate_param_num: 0,
+    rate_count: 0,
+    rate_current_idx: 0,
+    tlm_param_num: 0,
+    tlm_count: 0,
+    tlm_current_idx: 0,
+}));
+
 // Rocket State (Global)
 static ROCKET_STATE: Mutex<RefCell<RocketState>> = Mutex::new(RefCell::new(RocketState {
     temp: 0.0,
     press: 0.0,
     alt: 0.0,
     vel: 0.0,
-    lon: 0.0,
-    lat: 0.0,
+    lon: 0,
+    lat: 0,
     batt_voltage: 0,
     satellites: 0,
     gyro: [0.0; 3],
@@ -180,10 +196,11 @@ static MENU_STATE: Mutex<RefCell<MenuState>> = Mutex::new(RefCell::new(MenuState
         arm_enabled: false,
         pyro_test_enabled: false,
         abort_armed: false,
-        tx_power: 100,
-        tlm_ratio: 7,   // 1:2
-        packet_rate: 6, // 50Hz
-        elrs_config_dirty: false,
+        tx_power_idx: 3,       // mid power (~100mW on typical modules)
+        tx_power_max_idx: 0,
+        tlm_ratio: 7,          // 1:2
+        packet_rate: 6,        // 500Hz
+        elrs_config_dirty: true, // auto-push defaults at boot
     },
     is_active: false,
     encoder_position: 0,
@@ -208,21 +225,18 @@ async fn main(spawner: Spawner) {
     println!("[3/7] Embassy init OK");
 
     // ================================================================
-    // SPI2 for dual displays (Shared SPI bus)
-    // New ESP32-S3 pinout (avoids GPIO 0, 26-32 for PSRAM Octal):
+    // SPI2 for single display
     //   SCL (Clock)  : GPIO12
     //   SDA (MOSI)   : GPIO11
-    //   RES (Reset)   : GPIO14 (shared)
-    //   Screen 1 CS  : GPIO10, DC : GPIO9
-    //   Screen 2 CS  : GPIO13, DC : GPIO8
+    //   RES (Reset)   : GPIO14
+    //   Screen CS    : GPIO13
+    //   Screen DC    : GPIO8
     // ================================================================
-    let dc1 = Output::new(peripherals.GPIO9, Level::Low, OutputConfig::default());
-    let dc2 = Output::new(peripherals.GPIO8, Level::Low, OutputConfig::default());
+    let dc  = Output::new(peripherals.GPIO8,  Level::Low,  OutputConfig::default());
     let rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-    let cs1 = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
-    let cs2 = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
+    let cs  = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
 
-    // SPI2 with DMA
+    // SPI2
     let spi_config = SpiConfig::default()
         .with_frequency(Rate::from_mhz(80))
         .with_mode(SpiMode::_0);
@@ -230,18 +244,16 @@ async fn main(spawner: Spawner) {
         .unwrap()
         .with_sck(peripherals.GPIO12)
         .with_mosi(peripherals.GPIO11);
-    println!("[4/7] SPI2 init OK");
+    println!("[4/5] SPI2 init OK");
 
-    // Wrap shared resources in RefCell for display driver
     let spi_bus = RefCell::new(spi2);
-    let dc1_cell = RefCell::new(dc1);
-    let dc2_cell = RefCell::new(dc2);
-    let rst_bus = RefCell::new(rst);
+    let dc_cell  = RefCell::new(dc);
+    let rst_bus  = RefCell::new(rst);
 
     let mut delay = Delay::new();
     let mut display_driver =
-        display::Driver::new(&spi_bus, &dc1_cell, &dc2_cell, &rst_bus, cs1, cs2, &mut delay);
-    println!("[5/7] Dual Display init OK");
+        display::Driver::new(&spi_bus, &dc_cell, &rst_bus, cs, &mut delay);
+    println!("[5/5] Display init OK (CS:GPIO13 DC:GPIO8 RST:GPIO14)");
 
     // ================================================================
     // UART1 for CRSF to ELRS TX
@@ -261,24 +273,12 @@ async fn main(spawner: Spawner) {
     critical_section::with(|cs| {
         UART_CRSF.borrow_ref_mut(cs).replace(tx_blocking);
     });
-    println!("[6/7] UART1 CRSF init OK (TX:GPIO17 RX:GPIO18)");
-
-    // ================================================================
-    // Rotary encoder
-    //   Channel A : GPIO4
-    //   Channel B : GPIO5
-    //   Button    : GPIO6
-    // ================================================================
-    let enc_a = Input::new(peripherals.GPIO4, InputConfig::default().with_pull(Pull::Up));
-    let enc_b = Input::new(peripherals.GPIO5, InputConfig::default().with_pull(Pull::Up));
-    let enc_btn = Input::new(peripherals.GPIO6, InputConfig::default().with_pull(Pull::Up));
-
-    println!("[7/7] Encoder init OK (A:GPIO4 B:GPIO5 BTN:GPIO6)");
+    // UART1 init OK (TX:GPIO17 RX:GPIO18)
+    println!("[3/5] UART1 CRSF init OK (TX:GPIO17 RX:GPIO18)");
 
     println!("");
     println!("Ground Station ESP32-S3 Started!");
-    println!("Dual-core: Core0=CRSF, Core1=Display+Encoder");
-    println!("Dual ST7789 displays, PSRAM frame buffers");
+    println!("Single screen, CRSF radio, serial telemetry");
     println!("");
 
     // ================================================================
@@ -286,10 +286,8 @@ async fn main(spawner: Spawner) {
     // Core 0 (current / PRO_CPU): CRSF TX + RX (radio priority)
     // Core 1 (APP_CPU): Display loop + Encoder
     // ================================================================
-    // Spawn CRSF tasks on Core 0 (current core = main)
     spawner.spawn(crsf_tx_task()).unwrap();
     spawner.spawn(crsf_rx_task(rx)).unwrap();
-    spawner.spawn(encoder_task(enc_a, enc_b, enc_btn)).unwrap();
 
     let start_time = Instant::now();
     let mut frame_counter: u32 = 0;
@@ -298,30 +296,15 @@ async fn main(spawner: Spawner) {
         // Update uptime
         let uptime = (start_time.elapsed().as_millis() / 1000) as u32;
 
-        // Sync and Snapshots
-        let menu_snapshot = critical_section::with(|cs| {
+        // Keep uptime in menu state (used elsewhere) and sync arm control
+        critical_section::with(|cs| {
             let mut menu = MENU_STATE.borrow_ref_mut(cs);
             menu.uptime_secs = uptime;
-            // Sync Control
-            let mut ctrl = CONTROL.borrow_ref_mut(cs);
-            ctrl.arm_switch = menu.settings.arm_enabled;
-            ctrl.test_pyro = menu.settings.pyro_test_enabled;
-            ctrl.abort = menu.settings.abort_armed;
-
-            // Feed history with REAL altitude from global state
-            let alt = ROCKET_STATE.borrow_ref(cs).alt;
-            menu.push_history(alt);
-
-            menu.clone()
         });
 
         // Get Rocket Snapshot
         let state_snapshot = critical_section::with(|cs| {
-            let mut s = ROCKET_STATE.borrow_ref_mut(cs);
-            // Update arming status from control
-            s.armed = CONTROL.borrow_ref(cs).arm_switch;
-            // No simulation!
-            menu::MenuState::default(); // Dummy call or whatever, just need to return values
+            let s = ROCKET_STATE.borrow_ref(cs);
             RocketState {
                 temp: s.temp,
                 press: s.press,
@@ -348,10 +331,14 @@ async fn main(spawner: Spawner) {
             }
         });
 
-        display_driver.update(&state_snapshot, &menu_snapshot);
+        let cfg_dirty = critical_section::with(|cs| {
+            MENU_STATE.borrow_ref(cs).settings.elrs_config_dirty
+        });
 
-        if frame_counter % 20 == 0 {
-            // Send telemetry JSON to PC (~50Hz effective rate)
+        display_driver.update(&state_snapshot, uptime, state_snapshot.armed, cfg_dirty);
+
+        if frame_counter % 2 == 0 {
+            // Send telemetry JSON to PC (~500Hz effective rate)
             let json = serial::build_telemetry_json(
                 state_snapshot.uplink_rssi,
                 state_snapshot.downlink_rssi,
@@ -364,8 +351,8 @@ async fn main(spawner: Spawner) {
                 state_snapshot.satellites,
                 state_snapshot.alt,
                 state_snapshot.elrs_packet_count,
-                state_snapshot.lat,
-                state_snapshot.lon,
+                state_snapshot.lat, // i32 raw (deg * 1e7)
+                state_snapshot.lon, // i32 raw (deg * 1e7)
                 state_snapshot.temp,
                 state_snapshot.press,
             );
@@ -375,14 +362,31 @@ async fn main(spawner: Spawner) {
         // Send config status to PC every 500ms (2Hz)
         if frame_counter % 500 == 0 {
             let cfg_json = serial::build_config_json(
-                menu_snapshot.settings.tlm_ratio,
-                menu_snapshot.settings.packet_rate,
-                menu_snapshot.settings.tx_power,
-                menu_snapshot.theme_idx,
-                menu_snapshot.current_screen as u8,
-                menu_snapshot.is_active,
+                critical_section::with(|cs| MENU_STATE.borrow_ref(cs).settings.tlm_ratio),
+                critical_section::with(|cs| MENU_STATE.borrow_ref(cs).settings.packet_rate),
+                critical_section::with(|cs| MENU_STATE.borrow_ref(cs).settings.tx_power_idx),
+                0u8,  // theme unused
+                0u8,  // screen unused
+                false,
             );
             println!("{}", cfg_json);
+        }
+
+        // Send ELRS discovered params to PC every 2s (once discovery is done)
+        if frame_counter % 2000 == 500 {
+            let elrs_snap = critical_section::with(|cs| *ELRS_CONFIG.borrow_ref(cs));
+            if elrs_snap.discovery_done && elrs_snap.power_count > 0 {
+                let pwr_idx = critical_section::with(|cs| {
+                    MENU_STATE.borrow_ref(cs).settings.tx_power_idx
+                });
+                let elrs_json = serial::build_elrs_info_json(
+                    &elrs_snap.power_levels_mw,
+                    elrs_snap.power_count,
+                    pwr_idx,
+                    elrs_snap.discovery_done,
+                );
+                println!("{}", elrs_json);
+            }
         }
 
         frame_counter = frame_counter.wrapping_add(1);
@@ -506,16 +510,13 @@ async fn crsf_rx_task(
                                     }
                                     crsf::PacketType::Gps => {
                                         if payload.len() >= 15 {
-                                            let lat = i32::from_be_bytes(
+                                            // Store raw i32 (deg * 1e7) to avoid f32 precision loss
+                                            let lat_raw = i32::from_be_bytes(
                                                 payload[0..4].try_into().unwrap_or([0; 4]),
-                                            )
-                                                as f32
-                                                / 10_000_000.0;
-                                            let lon = i32::from_be_bytes(
+                                            );
+                                            let lon_raw = i32::from_be_bytes(
                                                 payload[4..8].try_into().unwrap_or([0; 4]),
-                                            )
-                                                as f32
-                                                / 10_000_000.0;
+                                            );
                                             let alt = u16::from_be_bytes(
                                                 payload[12..14].try_into().unwrap_or([0; 2]),
                                             )
@@ -523,14 +524,14 @@ async fn crsf_rx_task(
                                                 - 1000.0;
                                             let sats = payload[14];
                                             println!(
-                                                "  GPS: lat={:.5} lon={:.5} alt={:.1}m sats={}",
-                                                lat, lon, alt, sats
+                                                "  GPS: lat={} lon={} (raw*1e7) alt={:.1}m sats={}",
+                                                lat_raw, lon_raw, alt, sats
                                             );
 
                                             critical_section::with(|cs| {
                                                 let mut rs = ROCKET_STATE.borrow_ref_mut(cs);
-                                                rs.lat = lat;
-                                                rs.lon = lon;
+                                                rs.lat = lat_raw;
+                                                rs.lon = lon_raw;
                                                 rs.alt = alt;
                                                 rs.satellites = sats;
                                                 rs.elrs_gps_count =
@@ -705,9 +706,83 @@ async fn crsf_rx_task(
                                         );
                                         }
                                     }
+                                    crsf::PacketType::DeviceInfo => {
+                                        // Parse DeviceInfo to get field count
+                                        if let Some(field_count) = crsf::parse_device_info(&payload) {
+                                            println!("  DeviceInfo: {} params available", field_count);
+                                            critical_section::with(|cs| {
+                                                let mut elrs = ELRS_CONFIG.borrow_ref_mut(cs);
+                                                elrs.device_found = true;
+                                                elrs.total_params = field_count;
+                                            });
+                                        } else {
+                                            println!("  DeviceInfo: parse failed (len={})", payload.len());
+                                            // Still mark as found even if parse fails
+                                            critical_section::with(|cs| {
+                                                let mut elrs = ELRS_CONFIG.borrow_ref_mut(cs);
+                                                elrs.device_found = true;
+                                                if elrs.total_params == 0 {
+                                                    elrs.total_params = 15; // fallback
+                                                }
+                                            });
+                                        }
+                                    }
                                     crsf::PacketType::ParameterSettingsEntry => {
-                                        println!("  ParamEntry received (len={})", payload.len());
-                                        // Parse if detailed debugging needed
+                                        // Parse parameter entry for discovery
+                                        if let Some(param) = crsf::parse_parameter_entry(&payload) {
+                                            println!(
+                                                "  ParamEntry #{}: type={} parent={} opts={} val={} power={} rate={} tlm={} mw={}",
+                                                param.param_num, param.data_type, param.parent,
+                                                param.option_count, param.value,
+                                                param.is_power, param.is_rate, param.is_tlm, param.has_mw
+                                            );
+
+                                            critical_section::with(|cs| {
+                                                let mut elrs = ELRS_CONFIG.borrow_ref_mut(cs);
+
+                                                // Identify power parameter (TEXT_SELECTION with mW in options)
+                                                if param.is_power && param.has_mw && param.power_count > 0 {
+                                                    elrs.power_param_num = param.param_num;
+                                                    elrs.power_count = param.power_count;
+                                                    elrs.power_current_idx = param.value;
+                                                    elrs.power_levels_mw = param.power_levels;
+                                                    println!(
+                                                        "  → POWER discovered: param={} count={} current={} levels={:?}",
+                                                        param.param_num, param.power_count,
+                                                        param.value, &param.power_levels[..param.power_count as usize]
+                                                    );
+
+                                                    // Sync to menu settings
+                                                    let mut ms = MENU_STATE.borrow_ref_mut(cs);
+                                                    ms.settings.tx_power_max_idx = param.power_count.saturating_sub(1);
+                                                    ms.settings.tx_power_idx = param.value;
+                                                }
+
+                                                // Identify rate parameter
+                                                if param.is_rate && param.data_type == crsf::CRSF_PARAM_TYPE_TEXT_SELECTION {
+                                                    elrs.rate_param_num = param.param_num;
+                                                    elrs.rate_count = param.option_count;
+                                                    elrs.rate_current_idx = param.value;
+                                                    println!(
+                                                        "  → RATE discovered: param={} count={} current={}",
+                                                        param.param_num, param.option_count, param.value
+                                                    );
+                                                }
+
+                                                // Identify TLM ratio parameter
+                                                if param.is_tlm && param.data_type == crsf::CRSF_PARAM_TYPE_TEXT_SELECTION {
+                                                    elrs.tlm_param_num = param.param_num;
+                                                    elrs.tlm_count = param.option_count;
+                                                    elrs.tlm_current_idx = param.value;
+                                                    println!(
+                                                        "  → TLM discovered: param={} count={} current={}",
+                                                        param.param_num, param.option_count, param.value
+                                                    );
+                                                }
+                                            });
+                                        } else {
+                                            println!("  ParamEntry received (len={}) - parse failed", payload.len());
+                                        }
                                     }
                                     _ => {
                                         println!(
@@ -752,153 +827,177 @@ async fn crsf_rx_task(
     }
 }
 
-/// High priority encoder task (2kHz polling for fast response)
-/// Uses tick accumulation with configurable ticks per detent
-#[embassy_executor::task]
-async fn encoder_task(enc_a: Input<'static>, enc_b: Input<'static>, enc_btn: Input<'static>) {
-    // 500µs polling = 2kHz = much better for catching fast rotations
-    let mut ticker = Ticker::every(Duration::from_micros(500));
-    let mut btn_press_start: Option<u32> = None;
 
-    // Initial state
-    let mut last_enc_state = 0u8;
-    if enc_a.is_high() {
-        last_enc_state |= 0b01;
-    }
-    if enc_b.is_high() {
-        last_enc_state |= 0b10;
-    }
-
-    // Counter in 500µs units
-    let mut ticker_count = 0u32;
-
-    // Tick accumulator - adjust TICKS_PER_DETENT based on your encoder
-    // Most cheap encoders: 2 or 4 state changes per physical detent
-    // Try 2 first, if it skips increase to 4
-    let mut tick_accumulator: i32 = 0;
-    const TICKS_PER_DETENT: i32 = 2; // Reduced from 4 for more responsive feel
-
-    // Debounce in 500µs units (2 = 1ms debounce)
-    let mut last_transition_time = 0u32;
-    const DEBOUNCE_TICKS: u32 = 2; // 1ms debounce
-
-    // Look-up table for quadrature decoding
-    let enc_lut: [i8; 16] = [0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0];
-
-    loop {
-        ticker.next().await;
-        ticker_count = ticker_count.wrapping_add(1);
-
-        // Read encoder state
-        let mut curr_state = 0u8;
-        if enc_a.is_high() {
-            curr_state |= 0b01;
-        }
-        if enc_b.is_high() {
-            curr_state |= 0b10;
-        }
-
-        // Process encoder rotation
-        if curr_state != last_enc_state {
-            let time_since_last = ticker_count.wrapping_sub(last_transition_time);
-
-            if time_since_last >= DEBOUNCE_TICKS {
-                last_transition_time = ticker_count;
-
-                let idx = (last_enc_state << 2) | curr_state;
-                let val = enc_lut[idx as usize];
-
-                if val != 0 {
-                    tick_accumulator += val as i32;
-
-                    // Trigger on full detent
-                    if tick_accumulator >= TICKS_PER_DETENT {
-                        tick_accumulator = 0; // Reset fully to avoid drift
-                        critical_section::with(|cs| {
-                            MENU_STATE.borrow_ref_mut(cs).handle_encoder(1);
-                        });
-                    } else if tick_accumulator <= -TICKS_PER_DETENT {
-                        tick_accumulator = 0; // Reset fully
-                        critical_section::with(|cs| {
-                            MENU_STATE.borrow_ref_mut(cs).handle_encoder(-1);
-                        });
-                    }
-                }
-            }
-            last_enc_state = curr_state;
-        }
-
-        // Button logic (units are 500µs ticks)
-        let is_pressed = !enc_btn.is_high();
-
-        if is_pressed && btn_press_start.is_none() {
-            btn_press_start = Some(ticker_count);
-        } else if !is_pressed && btn_press_start.is_some() {
-            let start = btn_press_start.unwrap();
-            let duration_ticks = ticker_count.wrapping_sub(start);
-            btn_press_start = None;
-
-            // Convert to ms: duration_ticks * 0.5ms
-            let duration_ms = duration_ticks / 2;
-
-            if duration_ms > 50 {
-                // Debounce 50ms
-                if duration_ms > 1500 {
-                    // Long Press (> 1.5s)
-                    critical_section::with(|cs| {
-                        MENU_STATE.borrow_ref_mut(cs).handle_long_press();
-                    });
-                } else {
-                    // Short Press
-                    critical_section::with(|cs| {
-                        MENU_STATE.borrow_ref_mut(cs).handle_short_press();
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// CRSF Transmit task - sends RC channels at 50Hz + ELRS config
-/// Config sequence: Ping → wait 100ms → Write each param with 50ms gaps → verify
+/// CRSF Transmit task - sends RC channels at 50Hz + ELRS config + boot discovery
+/// Boot: Ping → read all params → discover power/rate/tlm
+/// Config: Ping → write each param with delays → retry
 #[embassy_executor::task]
 async fn crsf_tx_task() {
     let mut ticker = Ticker::every(Duration::from_hz(50)); // True 50Hz for RC
     let mut packet_count: u32 = 0;
 
-    // Config state machine
-    // 0 = idle, 1 = ping sent (wait), 2 = rate, 3 = tlm, 4 = power, 5 = done/retry
-    let mut config_step: u8 = 0;
-    let mut config_step_tick: u32 = 0; // tick when last step was executed
-    let mut config_retry_count: u8 = 0;
-    const CONFIG_STEP_DELAY: u32 = 5; // 5 ticks = 100ms at 50Hz between config steps
-    const CONFIG_PING_DELAY: u32 = 10; // 10 ticks = 200ms after ping
-    const MAX_CONFIG_RETRIES: u8 = 3;
+    // ===== Discovery state machine =====
+    // 0=wait boot, 1=ping sent, 2=wait device info, 3=reading params, 4=done
+    let mut discovery_state: u8 = 0;
+    let mut discovery_tick: u32 = 0;
+    let mut discovery_param_idx: u8 = 1;
+    const DISCOVERY_BOOT_WAIT: u32 = 100;  // 100 ticks = 2s at 50Hz
+    const DISCOVERY_PING_WAIT: u32 = 25;   // 500ms after ping
+    const DISCOVERY_READ_WAIT: u32 = 10;   // 200ms between param reads
 
-    println!("CRSF TX task started (50Hz RC channels) on Core 0");
+    // ===== Config state machine =====
+    let mut config_step: u8 = 0;
+    let mut config_step_tick: u32 = 0;
+    let mut config_retry_count: u8 = 0;
+    const CONFIG_STEP_DELAY: u32 = 8; // 160ms - give module more time to process
+    const CONFIG_PING_DELAY: u32 = 15; // 300ms - wait longer for ping response
+    const MAX_CONFIG_RETRIES: u8 = 5; // more retries for reliability
+
+    println!("CRSF TX task started (50Hz RC + ELRS discovery) on Core 0");
 
     loop {
         ticker.next().await;
         packet_count = packet_count.wrapping_add(1);
 
-        // ========== ELRS Config State Machine ==========
-        let (config_dirty, tlm_ratio, pkt_rate, tx_power) = critical_section::with(|cs| {
+        // ========== Boot Discovery Sequence ==========
+        if discovery_state < 4 {
+            match discovery_state {
+                0 => {
+                    // Wait for boot
+                    if packet_count >= DISCOVERY_BOOT_WAIT {
+                        println!("ELRS DISCOVERY: Sending Device Ping...");
+                        let ping = crsf::build_device_ping(crsf::CRSF_ADDRESS_TX);
+                        critical_section::with(|cs| {
+                            if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
+                                let _ = tx.write_all(&ping);
+                            }
+                        });
+                        discovery_state = 1;
+                        discovery_tick = packet_count;
+                    }
+                }
+                1 => {
+                    // Wait for DeviceInfo response
+                    let elapsed = packet_count.wrapping_sub(discovery_tick);
+                    if elapsed >= DISCOVERY_PING_WAIT {
+                        let (found, total) = critical_section::with(|cs| {
+                            let elrs = ELRS_CONFIG.borrow_ref(cs);
+                            (elrs.device_found, elrs.total_params)
+                        });
+                        if found && total > 0 {
+                            println!("ELRS DISCOVERY: Device found, {} params. Starting read...", total);
+                            discovery_state = 3;
+                            discovery_param_idx = 1;
+                            discovery_tick = packet_count;
+                        } else {
+                            // Retry ping
+                            println!("ELRS DISCOVERY: No response, retrying ping...");
+                            let ping = crsf::build_device_ping(crsf::CRSF_ADDRESS_TX);
+                            critical_section::with(|cs| {
+                                if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
+                                    let _ = tx.write_all(&ping);
+                                }
+                            });
+                            discovery_tick = packet_count;
+
+                            // After 3 retries, assume 15 params and proceed
+                            if elapsed >= DISCOVERY_PING_WAIT * 3 {
+                                println!("ELRS DISCOVERY: No DeviceInfo, assuming 15 params");
+                                critical_section::with(|cs| {
+                                    let mut elrs = ELRS_CONFIG.borrow_ref_mut(cs);
+                                    if elrs.total_params == 0 {
+                                        elrs.total_params = 15;
+                                    }
+                                });
+                                discovery_state = 3;
+                                discovery_param_idx = 1;
+                                discovery_tick = packet_count;
+                            }
+                        }
+                    }
+                }
+                3 => {
+                    // Read parameters one by one
+                    let elapsed = packet_count.wrapping_sub(discovery_tick);
+                    let total = critical_section::with(|cs| {
+                        ELRS_CONFIG.borrow_ref(cs).total_params
+                    });
+
+                    if elapsed >= DISCOVERY_READ_WAIT {
+                        if discovery_param_idx <= total && discovery_param_idx <= 20 {
+                            // Send ParameterRead request
+                            let frame = crsf::build_parameter_read(discovery_param_idx, 0);
+                            critical_section::with(|cs| {
+                                if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
+                                    let _ = tx.write_all(&frame);
+                                }
+                            });
+                            println!("ELRS DISCOVERY: Reading param {}/{}", discovery_param_idx, total);
+                            discovery_param_idx += 1;
+                            discovery_tick = packet_count;
+                        } else {
+                            // All params read
+                            critical_section::with(|cs| {
+                                ELRS_CONFIG.borrow_ref_mut(cs).discovery_done = true;
+                            });
+                            let elrs_snap = critical_section::with(|cs| {
+                                *ELRS_CONFIG.borrow_ref(cs)
+                            });
+                            println!("ELRS DISCOVERY: Complete!");
+                            println!("  Power: param={} count={} levels={:?} current={}",
+                                elrs_snap.power_param_num, elrs_snap.power_count,
+                                &elrs_snap.power_levels_mw[..elrs_snap.power_count as usize],
+                                elrs_snap.power_current_idx);
+                            println!("  Rate: param={} count={} current={}",
+                                elrs_snap.rate_param_num, elrs_snap.rate_count, elrs_snap.rate_current_idx);
+                            println!("  TLM: param={} count={} current={}",
+                                elrs_snap.tlm_param_num, elrs_snap.tlm_count, elrs_snap.tlm_current_idx);
+                            discovery_state = 4; // done
+
+                            // Auto re-trigger config write with discovered param numbers
+                            // This ensures correct params are used even if config already ran with fallbacks
+                            critical_section::with(|cs| {
+                                MENU_STATE.borrow_ref_mut(cs).settings.elrs_config_dirty = true;
+                            });
+                            config_step = 0;
+                            config_retry_count = 0;
+                            println!("ELRS CONFIG: Re-triggering with discovered params");
+                        }
+                    }
+                }
+                _ => {} // shouldn't reach here
+            }
+        }
+
+        // ========== ELRS Config Write State Machine ==========
+        let (config_dirty, tlm_ratio, pkt_rate, tx_power_idx) = critical_section::with(|cs| {
             let menu = MENU_STATE.borrow_ref(cs);
             (
                 menu.settings.elrs_config_dirty,
                 menu.settings.tlm_ratio,
                 menu.settings.packet_rate,
-                menu.settings.tx_power,
+                menu.settings.tx_power_idx,
             )
         });
 
-        if config_dirty && config_step == 0 {
-            // Start config sequence
+        // Get discovered param numbers (use fallback defaults if not discovered)
+        // ELRS 3.x typical param order: 1=Rate, 2=TLM, 3=SwitchMode, 4=AntMode, 5=TXPower(folder), 6=MaxPower, 7=Dynamic
+        let (power_pnum, rate_pnum, tlm_pnum) = critical_section::with(|cs| {
+            let elrs = ELRS_CONFIG.borrow_ref(cs);
+            (
+                if elrs.power_param_num > 0 { elrs.power_param_num } else { 6 },
+                if elrs.rate_param_num > 0 { elrs.rate_param_num } else { 1 },
+                if elrs.tlm_param_num > 0 { elrs.tlm_param_num } else { 2 },
+            )
+        });
+
+        // Start config after 3s boot delay (150 ticks at 50Hz), don't require discovery
+        if config_dirty && config_step == 0 && packet_count >= 150 {
             config_step = 1;
             config_step_tick = packet_count;
             config_retry_count = 0;
-            println!("ELRS CONFIG: Starting config sequence (rate={} tlm={} pwr={})",
-                     pkt_rate, tlm_ratio, tx_power);
+            println!("ELRS CONFIG: Starting (rate[p{}]={} tlm[p{}]={} pwr[p{}]={})",
+                     rate_pnum, pkt_rate, tlm_pnum, tlm_ratio, power_pnum, tx_power_idx);
         }
 
         if config_step > 0 {
@@ -906,8 +1005,6 @@ async fn crsf_tx_task() {
 
             match config_step {
                 1 => {
-                    // Step 1: Send Device Ping
-                    println!("ELRS CONFIG [1/5]: Device Ping → TX (0xEE)");
                     let ping = crsf::build_device_ping(crsf::CRSF_ADDRESS_TX);
                     critical_section::with(|cs| {
                         if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
@@ -918,153 +1015,67 @@ async fn crsf_tx_task() {
                     config_step_tick = packet_count;
                 }
                 2 if elapsed >= CONFIG_PING_DELAY => {
-                    // Step 2: Write Packet Rate (ELRS param 1)
-                    println!("ELRS CONFIG [2/5]: Packet Rate → index {}", pkt_rate);
-                    let frame = crsf::build_elrs_packet_rate(pkt_rate);
+                    // Write Packet Rate using discovered param number
+                    let frame = crsf::build_parameter_write(rate_pnum, pkt_rate);
                     critical_section::with(|cs| {
                         if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
                             let _ = tx.write_all(&frame);
                         }
                     });
+                    println!("ELRS CONFIG: Rate param {} → {}", rate_pnum, pkt_rate);
                     config_step = 3;
                     config_step_tick = packet_count;
                 }
                 3 if elapsed >= CONFIG_STEP_DELAY => {
-                    // Step 3: Write TLM Ratio (ELRS param 2)
-                    println!("ELRS CONFIG [3/5]: TLM Ratio → index {}", tlm_ratio);
-                    let frame = crsf::build_elrs_tlm_ratio(tlm_ratio);
+                    // Write TLM Ratio using discovered param number
+                    let frame = crsf::build_parameter_write(tlm_pnum, tlm_ratio);
                     critical_section::with(|cs| {
                         if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
                             let _ = tx.write_all(&frame);
                         }
                     });
+                    println!("ELRS CONFIG: TLM param {} → {}", tlm_pnum, tlm_ratio);
                     config_step = 4;
                     config_step_tick = packet_count;
                 }
                 4 if elapsed >= CONFIG_STEP_DELAY => {
-                    // Step 4: Write TX Power (ELRS param 3)
-                    // Convert power percentage to ELRS power index:
-                    // ELRS power levels: 0=10mW, 1=25mW, 2=50mW, 3=100mW, 4=250mW, 5=500mW, 6=1000mW, 7=2000mW
-                    // Map our 25/50/75/100% to reasonable indices
-                    let power_idx = match tx_power {
-                        0..=25 => 1,   // 25mW
-                        26..=50 => 3,  // 100mW
-                        51..=75 => 5,  // 500mW
-                        _ => 7,        // 2000mW (max)
-                    };
-                    println!("ELRS CONFIG [4/5]: TX Power → {}% (ELRS index {})", tx_power, power_idx);
-                    let frame = crsf::build_elrs_tx_power(power_idx);
+                    // Write TX Power using discovered param number - DIRECT INDEX
+                    // tx_power_idx is already the ELRS index into the discovered power levels
+                    let frame = crsf::build_parameter_write(power_pnum, tx_power_idx);
                     critical_section::with(|cs| {
                         if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
                             let _ = tx.write_all(&frame);
                         }
                     });
+                    // Look up mW value for logging
+                    let mw = critical_section::with(|cs| {
+                        let elrs = ELRS_CONFIG.borrow_ref(cs);
+                        if (tx_power_idx as usize) < elrs.power_count as usize {
+                            elrs.power_levels_mw[tx_power_idx as usize]
+                        } else {
+                            0
+                        }
+                    });
+                    println!("ELRS CONFIG: Power param {} → idx {} ({}mW)", power_pnum, tx_power_idx, mw);
                     config_step = 5;
                     config_step_tick = packet_count;
                 }
                 5 if elapsed >= CONFIG_STEP_DELAY => {
-                    // Step 5: Done or retry
                     config_retry_count += 1;
                     if config_retry_count < MAX_CONFIG_RETRIES {
-                        // Retry the full sequence for reliability
-                        println!("ELRS CONFIG [5/5]: Retry {}/{}", config_retry_count, MAX_CONFIG_RETRIES);
+                        println!("ELRS CONFIG: Retry {}/{}", config_retry_count, MAX_CONFIG_RETRIES);
                         config_step = 1;
                         config_step_tick = packet_count;
                     } else {
-                        // All retries done, clear dirty flag
                         critical_section::with(|cs| {
                             MENU_STATE.borrow_ref_mut(cs).settings.elrs_config_dirty = false;
                         });
-                        println!("ELRS CONFIG: Complete (sent {}x)", MAX_CONFIG_RETRIES);
+                        println!("ELRS CONFIG: Complete ({}x)", MAX_CONFIG_RETRIES);
                         config_step = 0;
                         config_retry_count = 0;
                     }
                 }
-                _ => {
-                    // Waiting for delay to elapse
-                }
-            }
-        }
-
-        // ========== Telemetry Interleaving (20Hz sub-tick) ==========
-        // RC at 50Hz, telemetry at 20Hz (every ~50ms = every 2-3 RC ticks)
-        static mut LAST_TELEM_TIME: Option<Instant> = None;
-        static mut TELEM_TICK: u32 = 0;
-
-        let now = Instant::now();
-        let should_tick = unsafe {
-            if let Some(last) = LAST_TELEM_TIME {
-                if now.duration_since(last) >= Duration::from_millis(50) {
-                    LAST_TELEM_TIME = Some(now);
-                    true
-                } else {
-                    false
-                }
-            } else {
-                LAST_TELEM_TIME = Some(now);
-                true
-            }
-        };
-
-        if should_tick {
-            let tick = unsafe {
-                let t = TELEM_TICK;
-                TELEM_TICK = TELEM_TICK.wrapping_add(1);
-                t
-            };
-
-            let ctrl = critical_section::with(|cs| *CONTROL.borrow_ref(cs));
-            let mut packet_to_send: Option<heapless::Vec<u8, 64>> = None;
-
-            let cycle_30 = tick % 30;
-            let cycle_5 = tick % 5;
-
-            if cycle_30 == 29 {
-                let mode_str = match ctrl.mode {
-                    0 => "MANUAL",
-                    1 => "STABILIZE",
-                    _ => "AUTO",
-                };
-                packet_to_send = Some(crsf::payload_flight_mode(mode_str));
-            } else if cycle_30 == 4 {
-                let (press, temp) = critical_section::with(|cs| {
-                    let rs = ROCKET_STATE.borrow_ref(cs);
-                    (rs.press, rs.temp)
-                });
-                packet_to_send = Some(crsf::payload_barometer(press * 100.0, temp));
-            } else if cycle_30 == 2 {
-                let (volt, batt_rem) = critical_section::with(|cs| {
-                    let rs = ROCKET_STATE.borrow_ref(cs);
-                    (rs.batt_voltage as f32 / 1000.0, 0u8)
-                });
-                packet_to_send = Some(crsf::payload_battery(volt, 0.0, 0.0, batt_rem));
-            } else if cycle_5 == 0 {
-                let (lat, lon, spd, hdg, alt, sats) = critical_section::with(|cs| {
-                    let rs = ROCKET_STATE.borrow_ref(cs);
-                    (rs.lat, rs.lon, rs.vel, 0.0, rs.alt, rs.satellites)
-                });
-                packet_to_send = Some(crsf::payload_gps(lat, lon, spd, hdg, alt, sats));
-            } else if cycle_5 == 1 {
-                let (p, r, y) = critical_section::with(|cs| {
-                    let rs = ROCKET_STATE.borrow_ref(cs);
-                    (rs.gyro[0], rs.gyro[1], rs.gyro[2])
-                });
-                packet_to_send = Some(crsf::payload_attitude(p / 57.29, r / 57.29, y / 57.29));
-            } else if cycle_5 == 3 {
-                let (alt, vel) = critical_section::with(|cs| {
-                    let rs = ROCKET_STATE.borrow_ref(cs);
-                    (rs.alt, rs.vel)
-                });
-                packet_to_send = Some(crsf::payload_vario(alt, vel));
-            }
-
-            if let Some(pkt) = packet_to_send {
-                let full_frame = crsf::build_telemetry_packet(&pkt);
-                critical_section::with(|cs| {
-                    if let Some(ref mut tx) = *UART_CRSF.borrow_ref_mut(cs) {
-                        let _ = tx.write_all(&full_frame);
-                    }
-                });
+                _ => {} // waiting for delay
             }
         }
 

@@ -27,8 +27,8 @@ pub fn build_telemetry_json(
     satellites: u8,
     alt: f32,
     packet_count: u32,
-    lat: f32,
-    lon: f32,
+    lat: i32,   // raw CRSF units: deg * 1e7
+    lon: i32,   // raw CRSF units: deg * 1e7
     temp: f32,
     press: f32,
 ) -> String<384> {
@@ -36,7 +36,7 @@ pub fn build_telemetry_json(
 
     // Complete JSON with all telemetry fields including GPS & environment
     let _ = core::fmt::write(&mut buf, format_args!(
-        "DATA:{{\"rssi\":{},\"drssi\":{},\"lq\":{},\"p\":{:.1},\"r\":{:.1},\"y\":{:.1},\"vario\":{:.2},\"batt\":{},\"sats\":{},\"alt\":{:.1},\"pkts\":{},\"lat\":{:.6},\"lon\":{:.6},\"temp\":{:.1},\"press\":{:.1}}}",
+        "DATA:{{\"rssi\":{},\"drssi\":{},\"lq\":{},\"p\":{:.1},\"r\":{:.1},\"y\":{:.1},\"vario\":{:.2},\"batt\":{},\"sats\":{},\"alt\":{:.1},\"pkts\":{},\"lat\":{},\"lon\":{},\"temp\":{:.1},\"press\":{:.1}}}",
         uplink_rssi, downlink_rssi, link_quality, pitch, roll, yaw, vario, batt_mv, satellites, alt, packet_count, lat, lon, temp, press
     ));
 
@@ -47,7 +47,7 @@ pub fn build_telemetry_json(
 pub fn build_config_json(
     tlm_ratio: u8,
     packet_rate: u8,
-    tx_power: u8,
+    tx_power_idx: u8,
     theme: u8,
     screen: u8,
     is_active: bool,
@@ -58,9 +58,35 @@ pub fn build_config_json(
         &mut buf,
         format_args!(
             "CFG:{{\"tlm\":{},\"rate\":{},\"pwr\":{},\"theme\":{},\"scr\":{},\"act\":{}}}",
-            tlm_ratio, packet_rate, tx_power, theme, screen, is_active as u8
+            tlm_ratio, packet_rate, tx_power_idx, theme, screen, is_active as u8
         ),
     );
+
+    buf
+}
+
+/// Build ELRS discovered parameters JSON for sending to PC app
+/// Format: ELRS:{"pwr":[10,25,50,100,250],"pwr_n":5,"pwr_i":3,"disc":1}
+pub fn build_elrs_info_json(
+    power_levels_mw: &[u16; 12],
+    power_count: u8,
+    power_current_idx: u8,
+    discovery_done: bool,
+) -> String<256> {
+    let mut buf = String::new();
+
+    // Build power array string manually
+    let _ = core::fmt::write(&mut buf, format_args!("ELRS:{{\"pwr\":["));
+    for i in 0..power_count as usize {
+        if i > 0 {
+            let _ = core::fmt::write(&mut buf, format_args!(","));
+        }
+        let _ = core::fmt::write(&mut buf, format_args!("{}", power_levels_mw[i]));
+    }
+    let _ = core::fmt::write(&mut buf, format_args!(
+        "],\"pwr_n\":{},\"pwr_i\":{},\"disc\":{}}}",
+        power_count, power_current_idx, discovery_done as u8
+    ));
 
     buf
 }

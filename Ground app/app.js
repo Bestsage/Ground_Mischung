@@ -128,8 +128,16 @@ class RocketTelemetry {
             accelY: document.getElementById('accelY'),
             accelZ: document.getElementById('accelZ'),
             signalStrength: document.getElementById('signalStrength'),
+            downlinkRssi: document.getElementById('downlinkRssi'),
             linkQuality: document.getElementById('linkQuality'),
             packetCount: document.getElementById('packetCount'),
+
+            // ELRS debug
+            elrsDiscovery: document.getElementById('elrsDiscovery'),
+            elrsPowerLevels: document.getElementById('elrsPowerLevels'),
+            elrsPwrIdx: document.getElementById('elrsPwrIdx'),
+            elrsRateIdx: document.getElementById('elrsRateIdx'),
+            elrsTlmIdx: document.getElementById('elrsTlmIdx'),
 
             // Visual elements
             voltageBar: document.getElementById('voltageBar'),
@@ -1214,9 +1222,23 @@ class RocketTelemetry {
                 // Handle config status from hardware
                 try {
                     this.applyConfig(data.data);
-                    this.addLog(`Config: TLM=${data.data.tlm} Rate=${data.data.rate} PWR=${data.data.pwr}%`, 'info');
+                    // Show mW if we have power levels, otherwise show raw index
+                    const pwrLabel = this.elrsPowerLevels
+                        ? (this.elrsPowerLevels[data.data.pwr] || `idx${data.data.pwr}`)
+                        : `idx${data.data.pwr}`;
+                    this.addLog(`Config: TLM=${data.data.tlm} Rate=${data.data.rate} PWR=${pwrLabel}mW`, 'info');
                 } catch (error) {
                     console.warn('Config parse error:', error.message);
+                }
+                break;
+
+            case 'elrs_params':
+                // Handle discovered ELRS parameters from hardware
+                try {
+                    this.applyElrsParams(data.data);
+                    this.addLog(`ELRS: ${data.data.pwr_n} power levels discovered`, 'success');
+                } catch (error) {
+                    console.warn('ELRS params parse error:', error.message);
                 }
                 break;
 
@@ -1247,8 +1269,9 @@ class RocketTelemetry {
         if (t.sats !== undefined) this.data.satellites = t.sats;
         if (t.alt !== undefined) this.data.altitude = t.alt;
         if (t.pkts !== undefined) this.data.packetCount = t.pkts;
-        if (t.lat !== undefined) this.data.latitude = t.lat;
-        if (t.lon !== undefined) this.data.longitude = t.lon;
+        // lat/lon are sent as raw i32 (deg * 1e7) to avoid f32 precision loss on hardware
+        if (t.lat !== undefined) this.data.latitude = t.lat / 1e7;
+        if (t.lon !== undefined) this.data.longitude = t.lon / 1e7;
         if (t.temp !== undefined) this.data.temperature = t.temp;
         if (t.press !== undefined) this.data.pressure = t.press;
 
@@ -1259,18 +1282,60 @@ class RocketTelemetry {
      * Apply config status from hardware
      */
     applyConfig(cfg) {
-        // cfg = {"tlm":7,"rate":1,"pwr":100,"theme":0,"scr":0,"act":0}
+        // cfg = {"tlm":7,"rate":1,"pwr":3,"theme":0,"scr":0,"act":0}
+        // pwr is now an ELRS power index (0-based), not a percentage
         this.config = {
             tlmRatio: cfg.tlm,
             packetRate: cfg.rate,
-            txPower: cfg.pwr,
+            txPower: cfg.pwr,   // ELRS power index
             theme: cfg.theme,
             screen: cfg.scr,
             isActive: cfg.act === 1
         };
 
+        // Update debug ELRS panel
+        this.updateValue('elrsRateIdx', cfg.rate);
+        this.updateValue('elrsTlmIdx', cfg.tlm);
+        this.updateValue('elrsPwrIdx', cfg.pwr);
+
         // Update UI if config panel exists
         this.updateConfigUI();
+    }
+
+    /**
+     * Apply discovered ELRS parameters (power levels, etc.)
+     * data = {"pwr":[10,25,50,100,250,500,1000],"pwr_n":7,"pwr_i":3,"disc":1}
+     */
+    applyElrsParams(data) {
+        this.elrsPowerLevels = data.pwr;  // Array of mW values
+
+        // Update ELRS debug panel
+        this.updateValue('elrsDiscovery', data.disc ? 'OK' : 'pending');
+        this.updateValue('elrsPowerLevels', data.pwr ? data.pwr.join(', ') : '--');
+        this.updateValue('elrsPwrIdx', data.pwr_i ?? '--');
+
+        // Rebuild the txPower dropdown with discovered power levels
+        const pwrEl = document.getElementById('txPower');
+        if (pwrEl && data.pwr && data.pwr.length > 0) {
+            // Only rebuild if the options have changed
+            const currentOptions = Array.from(pwrEl.options).map(o => o.text).join(',');
+            const newOptions = data.pwr.map(mw => `${mw} mW`).join(',');
+
+            if (currentOptions !== newOptions) {
+                pwrEl.innerHTML = '';
+                data.pwr.forEach((mw, idx) => {
+                    const opt = document.createElement('option');
+                    opt.value = idx;        // Send ELRS index as value
+                    opt.textContent = `${mw} mW`;
+                    pwrEl.appendChild(opt);
+                });
+            }
+
+            // Sync current selection from hardware
+            if (this.config && this.config.txPower !== undefined) {
+                pwrEl.value = this.config.txPower;
+            }
+        }
     }
 
     /**
@@ -1285,7 +1350,7 @@ class RocketTelemetry {
 
         if (tlmEl) tlmEl.value = this.config.tlmRatio;
         if (rateEl) rateEl.value = this.config.packetRate;
-        if (pwrEl) pwrEl.value = this.config.txPower;
+        if (pwrEl) pwrEl.value = this.config.txPower;  // ELRS index
     }
 
     /**
@@ -1424,6 +1489,7 @@ class RocketTelemetry {
         // RF Link (new fields from hardware)
         this.updateValue('voltage', this.data.voltage ?? '--');
         this.updateValue('signalStrength', this.data.signalStrength ?? '--');
+        this.updateValue('downlinkRssi', this.data.downlinkRssi ?? '--');
         this.updateValue('linkQuality', this.data.linkQuality ?? '--');
         this.updateValue('packetCount', this.data.packetCount ?? '--');
 
@@ -1436,9 +1502,6 @@ class RocketTelemetry {
         this.updateValue('accelZ', this.data.accelZ?.toFixed(2) ?? '--');
 
         // Update visuals
-        this.updateVoltageBar();
-        this.updateSignalBars();
-        this.updateLinkQualityBar();
         this.updateRocketAttitude();
         this.updateCharts();
         this.updateMaps();
@@ -1448,7 +1511,11 @@ class RocketTelemetry {
      * Update single value element
      */
     updateValue(elementId, value) {
-        const element = this.elements[elementId];
+        let element = this.elements[elementId];
+        if (!element) {
+            element = document.getElementById(elementId);
+            if (element) this.elements[elementId] = element;
+        }
         if (!element) return;
 
         const oldValue = element.textContent;

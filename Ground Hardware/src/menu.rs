@@ -100,9 +100,10 @@ pub struct ControlSettings {
     pub arm_enabled: bool,
     pub pyro_test_enabled: bool,
     pub abort_armed: bool,
-    pub tx_power: u8,    // 0-100%
-    pub tlm_ratio: u8,   // ELRS telemetry ratio index: 0=Off, 1=1:128...7=1:2
-    pub packet_rate: u8, // ELRS packet rate index: 0=25Hz...6=500Hz
+    pub tx_power_idx: u8,      // ELRS power index (0-based into discovered levels)
+    pub tx_power_max_idx: u8,  // max valid power index (from discovery)
+    pub tlm_ratio: u8,         // ELRS telemetry ratio index: 0=Off, 1=1:128...7=1:2
+    pub packet_rate: u8,       // ELRS packet rate index: 0=25Hz...6=500Hz
     pub elrs_config_dirty: bool,
 }
 
@@ -112,9 +113,10 @@ impl Default for ControlSettings {
             arm_enabled: false,
             pyro_test_enabled: false,
             abort_armed: false,
-            tx_power: 100,
-            tlm_ratio: 7,   // 1:2 (good for telemetry)
-            packet_rate: 1, // 50Hz
+            tx_power_idx: 3,       // mid power (~100mW on typical modules)
+            tx_power_max_idx: 0,   // 0 = not yet discovered
+            tlm_ratio: 7,          // 1:2
+            packet_rate: 6,        // 500Hz
             elrs_config_dirty: false,
         }
     }
@@ -210,13 +212,15 @@ impl MenuState {
                         self.settings.elrs_config_dirty = true;
                     }
                     2 => {
-                        // TX Power: cycle 25, 50, 75, 100
-                        self.settings.tx_power = match self.settings.tx_power {
-                            25 => 50,
-                            50 => 75,
-                            75 => 100,
-                            _ => 25,
-                        };
+                        // TX Power: cycle through discovered ELRS power levels
+                        if self.settings.tx_power_max_idx > 0 {
+                            self.settings.tx_power_idx =
+                                (self.settings.tx_power_idx + 1) % (self.settings.tx_power_max_idx + 1);
+                        } else {
+                            // Not yet discovered, allow 0-7 as fallback
+                            self.settings.tx_power_idx = (self.settings.tx_power_idx + 1) % 8;
+                        }
+                        self.settings.elrs_config_dirty = true;
                     }
                     _ => {}
                 }

@@ -1,7 +1,20 @@
+//! display.rs — Single ST7789 screen, maximum debug + flight info
+//! Screen: 240×280 (ST7789, SPI, CS=GPIO13, DC=GPIO8, RST=GPIO14)
+//!
+//! Layout (all values update every frame, labels once at boot):
+//!  [0..27]   HEADER   : status dot | UP/DN RSSI | LQ
+//!  [28..93]  GPS      : LAT / LON / ALT + SATS
+//!  [94..123] IMU      : Pitch / Roll / Yaw
+//!  [124..153]BARO     : Pressure + Temp
+//!  [154..173]VARIO    : vertical speed
+//!  [174..198]BATT     : mV + armed flag
+//!  [199..237]DEBUG    : packet counters, gps count, radio-id timing
+//!  [238..279]FOOTER   : uptime + config flags
+
 use core::cell::RefCell;
 use display_interface_spi::SPIInterface;
 use embedded_graphics::{
-    mono_font::{ascii::FONT_10X20, ascii::FONT_6X10, MonoTextStyle, MonoTextStyleBuilder},
+    mono_font::{ascii::FONT_6X10, ascii::FONT_6X13, MonoTextStyle, MonoTextStyleBuilder},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Circle, PrimitiveStyle, Rectangle},
@@ -9,108 +22,102 @@ use embedded_graphics::{
 };
 use embedded_hal::digital::{ErrorType, OutputPin};
 use embedded_hal_bus::spi::RefCellDevice;
-use esp_hal::{
-    delay::Delay,
-    gpio::Output,
-    spi::master::Spi,
-};
+use esp_hal::{delay::Delay, gpio::Output, spi::master::Spi};
 use heapless::String;
 use mipidsi::{
     models::ST7789,
     options::{ColorInversion, Orientation},
     Builder,
 };
-
-// Import DelayNs trait to enable delay_ms
 use embedded_hal::delay::DelayNs;
 
-use crate::menu::{MenuState, Screen};
 use crate::RocketState;
 
-/// SharedPin wrapper allows multiple drivers to share the same OutputPin (e.g. DC or RST)
-/// by holding a reference to a RefCell.
+// ─────────────────────────────────────────────────────────────────────────────
+// Pin helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// SharedPin: allows sharing a RefCell<OutputPin> across the SPI-interface and
+/// the display driver without unsafe code.
 #[derive(Clone, Copy)]
 pub struct SharedPin<'a, P> {
     pub pin: &'a RefCell<P>,
 }
-
 impl<'a, P: OutputPin> ErrorType for SharedPin<'a, P> {
     type Error = P::Error;
 }
-
 impl<'a, P: OutputPin> OutputPin for SharedPin<'a, P> {
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        self.pin.borrow_mut().set_low()
-    }
-
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        self.pin.borrow_mut().set_high()
-    }
+    fn set_low(&mut self) -> Result<(), Self::Error> { self.pin.borrow_mut().set_low() }
+    fn set_high(&mut self) -> Result<(), Self::Error> { self.pin.borrow_mut().set_high() }
 }
 
-type SpiType<'d> = Spi<'d, esp_hal::Blocking>;
+/// Dummy reset pin — RST is toggled manually before init.
+pub struct NoResetPin;
+impl OutputPin for NoResetPin {
+    fn set_low(&mut self) -> Result<(), Self::Error> { Ok(()) }
+    fn set_high(&mut self) -> Result<(), Self::Error> { Ok(()) }
+}
+impl ErrorType for NoResetPin {
+    type Error = core::convert::Infallible;
+}
 
-// Each screen has its own DC pin now (separate GPIO9 and GPIO8)
-// Use RefCellDevice for shared SPI bus, SharedPin for per-screen DC.
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+type SpiType<'d> = Spi<'d, esp_hal::Blocking>;
 type DisplayType<'d> = mipidsi::Display<
     SPIInterface<RefCellDevice<'d, SpiType<'d>, Output<'d>, Delay>, SharedPin<'d, Output<'d>>>,
     ST7789,
     NoResetPin,
 >;
 
-pub struct NoResetPin;
-impl OutputPin for NoResetPin {
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-impl ErrorType for NoResetPin {
-    type Error = core::convert::Infallible;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Color palette
+// ─────────────────────────────────────────────────────────────────────────────
+const BG        : Rgb565 = Rgb565::new(1, 2, 2);       // near-black
+const HDR_BG    : Rgb565 = Rgb565::new(0, 6, 13);      // dark blue
+const FTR_BG    : Rgb565 = Rgb565::new(0, 4, 8);
+const ACCENT    : Rgb565 = Rgb565::new(0, 20, 31);     // cyan
+const LBL_GRAY  : Rgb565 = Rgb565::new(12, 20, 12);    // mid gray (label)
+const OK_GREEN  : Rgb565 = Rgb565::new(0, 30, 7);
+const WARN_YLW  : Rgb565 = Rgb565::new(31, 27, 0);
+const ERR_RED   : Rgb565 = Rgb565::new(31, 4, 2);
+const WHITE     : Rgb565 = Rgb565::WHITE;
+const DIM_WHITE : Rgb565 = Rgb565::new(20, 40, 20);
 
-// Colors
-const BG_COLOR: Rgb565 = Rgb565::new(1, 2, 2);
-const HEADER_BG: Rgb565 = Rgb565::new(0, 8, 16);
-const OK_GREEN: Rgb565 = Rgb565::new(0, 31, 8);
-const WARN_YELLOW: Rgb565 = Rgb565::new(31, 28, 0);
-const ERR_RED: Rgb565 = Rgb565::new(31, 4, 4);
-const SELECTED_BG: Rgb565 = Rgb565::new(4, 8, 12);
+// ─────────────────────────────────────────────────────────────────────────────
+// Driver
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct Driver<'d> {
-    display1: DisplayType<'d>,
-    display2: DisplayType<'d>,
+    display: DisplayType<'d>,
     frame_count: u32,
-    last_screen: Option<Screen>,
 }
 
 impl<'d> Driver<'d> {
+    /// Initialise the single display.
+    /// cs  : chip-select for this screen (GPIO13)
+    /// dc  : data/command pin for this screen (GPIO8)
+    /// rst_bus : shared reset line (GPIO14) — toggled once here
     pub fn new(
-        spi_bus: &'d RefCell<SpiType<'d>>,
-        dc1_bus: &'d RefCell<Output<'d>>,
-        dc2_bus: &'d RefCell<Output<'d>>,
-        rst_bus: &'d RefCell<Output<'d>>,
-        cs1: Output<'d>,
-        cs2: Output<'d>,
-        delay: &mut Delay,
+        spi_bus : &'d RefCell<SpiType<'d>>,
+        dc_bus  : &'d RefCell<Output<'d>>,
+        rst_bus : &'d RefCell<Output<'d>>,
+        cs      : Output<'d>,
+        delay   : &mut Delay,
     ) -> Self {
-        // Separate DC pins for each screen (GPIO9 for Screen1, GPIO8 for Screen2)
-        let dc1 = SharedPin { pin: dc1_bus };
-        let dc2 = SharedPin { pin: dc2_bus };
-        // rst is handled manually below (shared GPIO14)
-
-        // Manual Reset for both displays (since they share RST)
+        // Hardware reset
         let _ = rst_bus.borrow_mut().set_low();
         delay.delay_ms(10);
         let _ = rst_bus.borrow_mut().set_high();
-        delay.delay_ms(150); // Wait for restart
+        delay.delay_ms(150);
 
-        // Display 1 (CS1=GPIO10, DC1=GPIO9)
-        let device1 = RefCellDevice::new(spi_bus, cs1, Delay::new()).unwrap();
-        let di1 = SPIInterface::new(device1, dc1);
-        let mut display1 = Builder::new(ST7789, di1)
+        let dc = SharedPin { pin: dc_bus };
+        let device = RefCellDevice::new(spi_bus, cs, Delay::new()).unwrap();
+        let di = SPIInterface::new(device, dc);
+
+        let mut display = Builder::new(ST7789, di)
             .display_size(240, 280)
             .display_offset(0, 20)
             .orientation(Orientation::default())
@@ -118,473 +125,274 @@ impl<'d> Driver<'d> {
             .reset_pin(NoResetPin)
             .init(delay)
             .unwrap();
-        let _ = display1.clear(BG_COLOR);
 
-        // Display 2 (CS2=GPIO13, DC2=GPIO8)
-        let device2 = RefCellDevice::new(spi_bus, cs2, Delay::new()).unwrap();
-        let di2 = SPIInterface::new(device2, dc2);
-        let mut display2 = Builder::new(ST7789, di2)
-            .display_size(240, 280)
-            .display_offset(0, 20)
-            .orientation(Orientation::default())
-            .invert_colors(ColorInversion::Inverted)
-            .reset_pin(NoResetPin)
-            .init(delay)
-            .unwrap();
-        let _ = display2.clear(BG_COLOR);
-
-        Self {
-            display1,
-            display2,
-            frame_count: 0,
-            last_screen: None,
-        }
+        let _ = display.clear(BG);
+        Self { display, frame_count: 0 }
     }
 
-    pub fn update(&mut self, state: &RocketState, menu: &MenuState) {
+    /// Called every frame. draw_labels=true only on frame 1 (static text).
+    pub fn update(&mut self, state: &RocketState, uptime_secs: u32, armed: bool, cfg_dirty: bool) {
         self.frame_count = self.frame_count.wrapping_add(1);
-
-        // D1 is static, draw labels only once on frame 1
-        let d1_first = self.frame_count == 1;
-
-        // D2 changes w/ menu
-        let screen_changed = self.last_screen != Some(menu.current_screen);
-        let d2_redraw = screen_changed || d1_first;
-
-        if screen_changed {
-            // Only clear D2 logic
-            let _ = self.display2.clear(BG_COLOR);
-            self.last_screen = Some(menu.current_screen);
+        let first = self.frame_count == 1;
+        if first {
+            let _ = self.display.clear(BG);
         }
-
-        // Initial clear for D1
-        if d1_first {
-            let _ = self.display1.clear(BG_COLOR);
-        }
-
-        // Draw to Display 1 (Main Flight Data)
-        // Pass d1_first flag to draw labels only once
-        Self::draw_display1_static(&mut self.display1, state, menu, d1_first);
-
-        // Draw to Display 2 (Menu & Config)
-        Self::draw_display2_static(&mut self.display2, state, menu, d2_redraw);
+        Self::draw_all(&mut self.display, state, uptime_secs, armed, cfg_dirty, first);
     }
 
-    // Display 1: FLIGHT DASHBOARD
-    // Shows critical info: RSSI, Battery, Vario, Altitude
-    // Display 1: FLIGHT DASHBOARD
-    // Shows critical info: RSSI, Battery, Vario, Altitude
-    fn draw_display1_static(
-        target: &mut DisplayType<'d>,
-        state: &RocketState,
-        menu: &MenuState,
-        draw_labels: bool,
+    // ─────────────────────────────────────────────────────────────────────────
+    // Master draw — called every frame
+    // ─────────────────────────────────────────────────────────────────────────
+    fn draw_all(
+        d         : &mut DisplayType<'d>,
+        state     : &RocketState,
+        uptime    : u32,
+        armed     : bool,
+        cfg_dirty : bool,
+        labels    : bool,
     ) {
-        if draw_labels {
-            Self::draw_header(target, "FLIGHT DASH", state.link_quality);
-        } else {
-            // Just update header status icon (link quality)
-            Self::draw_header_status(target, state.link_quality);
+        let mut buf = String::<64>::new();
+
+        // ── Inline style helpers (background = BG so values erase themselves) ──
+        let val_w = MonoTextStyleBuilder::new()  // white  value
+            .font(&FONT_6X13).text_color(WHITE).background_color(BG).build();
+        let val_g = MonoTextStyleBuilder::new()  // green  value
+            .font(&FONT_6X13).text_color(OK_GREEN).background_color(BG).build();
+        let val_y = MonoTextStyleBuilder::new()  // yellow value
+            .font(&FONT_6X13).text_color(WARN_YLW).background_color(BG).build();
+        let val_r = MonoTextStyleBuilder::new()  // red    value
+            .font(&FONT_6X13).text_color(ERR_RED).background_color(BG).build();
+        let val_c = MonoTextStyleBuilder::new()  // cyan   value
+            .font(&FONT_6X13).text_color(ACCENT).background_color(BG).build();
+        let val_d = MonoTextStyleBuilder::new()  // dim    value
+            .font(&FONT_6X10).text_color(DIM_WHITE).background_color(BG).build();
+        let lbl   = MonoTextStyle::new(&FONT_6X10, LBL_GRAY);
+        let acc_s = MonoTextStyle::new(&FONT_6X10, ACCENT);
+
+        // ── Colour helpers ────────────────────────────────────────────────────
+        fn rssi_color(v: i32) -> Rgb565 {
+            if v > -65 { OK_GREEN } else if v > -85 { WARN_YLW } else { ERR_RED }
+        }
+        fn lq_color(v: u8) -> Rgb565 {
+            if v > 80 { OK_GREEN } else if v > 50 { WARN_YLW } else { ERR_RED }
         }
 
-        // Re-use sensor drawing, passing draw_labels flag
-        Self::draw_elrs_sensors(target, state, menu, draw_labels);
-    }
-
-    // Helper to update just the status circle without redrawing the whole header
-    fn draw_header_status(target: &mut DisplayType<'d>, link_quality: u8) {
-        let indicator_color = if link_quality > 80 {
-            OK_GREEN
-        } else if link_quality > 50 {
-            WARN_YELLOW
-        } else {
-            ERR_RED
-        };
-        let _ = Circle::new(Point::new(210, 4), 20)
-            .into_styled(PrimitiveStyle::with_fill(indicator_color))
-            .draw(target);
-    }
-
-    // Display 2: MENU & SETTINGS
-    // Controlled by encoder.
-    // Display 2: MENU & SETTINGS
-    // Controlled by encoder.
-    fn draw_display2_static(
-        target: &mut DisplayType<'d>,
-        state: &RocketState,
-        menu: &MenuState,
-        draw_labels: bool,
-    ) {
-        if draw_labels {
-            // Draw header
-            Self::draw_header(target, menu.current_screen.name(), state.link_quality);
-        } else {
-            Self::draw_header_status(target, state.link_quality);
+        // ══════════════════════════════════════════════════════════════════════
+        // SECTION 0 — HEADER  (y 0..27)
+        // ══════════════════════════════════════════════════════════════════════
+        if labels {
+            let _ = Rectangle::new(Point::new(0, 0), Size::new(240, 27))
+                .into_styled(PrimitiveStyle::with_fill(HDR_BG)).draw(d);
+            let hdr_lbl = MonoTextStyleBuilder::new()
+                .font(&FONT_6X10).text_color(ACCENT).background_color(HDR_BG).build();
+            let _ = Text::new("UP:", Point::new(4, 18), hdr_lbl).draw(d);
+            let _ = Text::new("DN:", Point::new(76, 18), hdr_lbl).draw(d);
+            let _ = Text::new("LQ:", Point::new(148, 18), hdr_lbl).draw(d);
         }
+        // Status dot
+        let dot_color = lq_color(state.link_quality);
+        let _ = Circle::new(Point::new(218, 4), 18)
+            .into_styled(PrimitiveStyle::with_fill(dot_color)).draw(d);
 
-        // Draw menu content
-        match menu.current_screen {
-            Screen::ElrsSensors => {
-                // On the secondary screen, "ElrsSensors" mode shows detailed extra stats
-                Self::draw_detailed_stats(target, state, menu, draw_labels);
-            }
-            Screen::ElrsConfig => Self::draw_elrs_config(target, menu),
-            Screen::Settings => Self::draw_settings(target, menu),
-        }
-
-        // Footer with navigation hint (only redraw if needed? actually simple enough to redraw)
-        if draw_labels {
-            Self::draw_footer(target, menu);
-        }
-    }
-
-    // Specific for D2 - detailed stats
-    fn draw_detailed_stats(
-        target: &mut DisplayType<'d>,
-        state: &RocketState,
-        _menu: &MenuState,
-        draw_labels: bool,
-    ) {
-        let label_style = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
-        // Opaque value style
-        let value_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(Rgb565::WHITE)
-            .background_color(BG_COLOR)
-            .build();
-
-        if draw_labels {
-            let _ = Text::new("GPS Coords:", Point::new(10, 60), label_style).draw(target);
-        }
-
-        let mut buf = String::<32>::new();
-        let _ = core::fmt::write(&mut buf, format_args!("{:.5}   ", state.lat)); // Pad
-        let _ = Text::new(&buf, Point::new(10, 80), value_style).draw(target);
-
+        // UP RSSI
+        let up_style = MonoTextStyleBuilder::new().font(&FONT_6X13)
+            .text_color(rssi_color(state.uplink_rssi)).background_color(HDR_BG).build();
         buf.clear();
-        let _ = core::fmt::write(&mut buf, format_args!("{:.5}   ", state.lon));
-        let _ = Text::new(&buf, Point::new(10, 100), value_style).draw(target);
+        let _ = core::fmt::write(&mut buf, format_args!("{:4}", state.uplink_rssi));
+        let _ = Text::new(&buf, Point::new(22, 19), up_style).draw(d);
 
-        // Altitude Max
-        if draw_labels {
-            let _ = Text::new("Est. Max Alt:", Point::new(10, 140), label_style).draw(target);
-        }
+        // DN RSSI
+        let dn_style = MonoTextStyleBuilder::new().font(&FONT_6X13)
+            .text_color(rssi_color(state.downlink_rssi)).background_color(HDR_BG).build();
         buf.clear();
-        let _ = core::fmt::write(&mut buf, format_args!("{:.1}m    ", state.alt)); // Placeholder for max logic
-        let _ = Text::new(&buf, Point::new(10, 160), value_style).draw(target);
-    }
-
-    fn get_theme_accent(theme_idx: u8) -> Rgb565 {
-        match theme_idx {
-            0 => Rgb565::new(0, 20, 31), // Cyan (Default)
-            1 => Rgb565::new(31, 20, 0), // Orange
-            2 => Rgb565::new(0, 31, 5),  // Matrix Green
-            3 => Rgb565::new(28, 5, 28), // Purple
-            _ => Rgb565::new(0, 20, 31),
-        }
-    }
-
-    fn draw_header(target: &mut DisplayType<'d>, title: &str, link_quality: u8) {
-        // Header bar
-        let _ = Rectangle::new(Point::new(0, 0), Size::new(240, 28))
-            .into_styled(PrimitiveStyle::with_fill(HEADER_BG))
-            .draw(target);
-
-        // Title
-        let title_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
-        let _ = Text::new(title, Point::new(8, 20), title_style).draw(target);
-
-        // Link quality indicator
-        let indicator_color = if link_quality > 80 {
-            OK_GREEN
-        } else if link_quality > 50 {
-            WARN_YELLOW
-        } else {
-            ERR_RED
-        };
-        let _ = Circle::new(Point::new(210, 4), 20)
-            .into_styled(PrimitiveStyle::with_fill(indicator_color))
-            .draw(target);
-    }
-
-    fn draw_footer(target: &mut DisplayType<'d>, menu: &MenuState) {
-        let _ = Rectangle::new(Point::new(0, 255), Size::new(240, 25))
-            .into_styled(PrimitiveStyle::with_fill(HEADER_BG))
-            .draw(target);
-
-        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
-        let hint = if menu.is_active {
-            "HOLD 1.5s -> EXIT"
-        } else {
-            "HOLD 1.5s -> ENTER"
-        };
-        let x = (240 - (hint.len() as i32 * 6)) / 2;
-        let _ = Text::new(hint, Point::new(x, 270), style).draw(target);
-    }
-
-    /// Screen 1: ELRS Sensors - optimized partial redraw
-    fn draw_elrs_sensors(
-        target: &mut DisplayType<'d>,
-        state: &RocketState,
-        menu: &MenuState,
-        draw_labels: bool,
-    ) {
-        let mut buf = String::<48>::new();
-        // Opaque styles avoid needing clear rects
-        let value_style = MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(Rgb565::WHITE)
-            .background_color(BG_COLOR)
-            .build();
-
-        let accent = Self::get_theme_accent(menu.theme_idx);
-        let header_style = MonoTextStyle::new(&FONT_6X10, accent);
-
-        // === RF LINK ===
-        if draw_labels {
-            let _ = Text::new("[ RF LINK ]", Point::new(10, 45), header_style).draw(target);
-        }
-
-        // UPLINK
-        let up_color = if state.uplink_rssi > -60 {
-            OK_GREEN
-        } else if state.uplink_rssi > -80 {
-            WARN_YELLOW
-        } else {
-            ERR_RED
-        };
-        let up_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(up_color)
-            .background_color(BG_COLOR)
-            .build();
-
-        // UP Value
-        buf.clear();
-        let _ = core::fmt::write(&mut buf, format_args!("UP:{:3}", state.uplink_rssi)); // Pad width
-        let _ = Text::new(&buf, Point::new(10, 72), up_style).draw(target);
-
-        // DOWNLINK
-        let dn_color = if state.downlink_rssi > -60 {
-            OK_GREEN
-        } else if state.downlink_rssi > -80 {
-            WARN_YELLOW
-        } else {
-            ERR_RED
-        };
-        let dn_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(dn_color)
-            .background_color(BG_COLOR)
-            .build();
-
-        buf.clear();
-        let _ = core::fmt::write(&mut buf, format_args!("DN:{:3}", state.downlink_rssi));
-        let _ = Text::new(&buf, Point::new(10, 92), dn_style).draw(target);
+        let _ = core::fmt::write(&mut buf, format_args!("{:4}", state.downlink_rssi));
+        let _ = Text::new(&buf, Point::new(94, 19), dn_style).draw(d);
 
         // LQ
+        let lq_style = MonoTextStyleBuilder::new().font(&FONT_6X13)
+            .text_color(lq_color(state.link_quality)).background_color(HDR_BG).build();
         buf.clear();
-        let _ = core::fmt::write(&mut buf, format_args!("LQ:{:3}", state.link_quality));
-        let lq_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(Rgb565::WHITE)
-            .background_color(BG_COLOR)
-            .build();
-        let _ = Text::new(&buf, Point::new(130, 72), lq_style).draw(target);
+        let _ = core::fmt::write(&mut buf, format_args!("{:3}%", state.link_quality));
+        let _ = Text::new(&buf, Point::new(166, 19), lq_style).draw(d);
 
-        // === ATTITUDE ===
-        if draw_labels {
-            let _ = Text::new("[ ATTITUDE ]", Point::new(10, 95), header_style).draw(target);
+        // ══════════════════════════════════════════════════════════════════════
+        // SECTION 1 — GPS  (y 28..93)
+        // ══════════════════════════════════════════════════════════════════════
+        if labels {
+            let _ = Text::new("[ GPS ]", Point::new(4, 40), acc_s).draw(d);
+            let _ = Text::new("LAT", Point::new(4, 54), lbl).draw(d);
+            let _ = Text::new("LON", Point::new(4, 68), lbl).draw(d);
+            let _ = Text::new("ALT", Point::new(4, 82), lbl).draw(d);
+            let _ = Text::new("SATS", Point::new(136, 82), lbl).draw(d);
         }
+        // Satellite-count dependent color for GPS values
+        let gps_style = if state.satellites >= 6 { val_g }
+                        else if state.satellites >= 3 { val_y }
+                        else { val_r };
 
-        let attitude_items = [
-            ("P", state.gyro[0]),
-            ("R", state.gyro[1]),
-            ("Y", state.gyro[2]),
-        ];
+        // LAT: raw i32 (deg*1e7) → display as decimal with 6 dp
+        let lat_deg = state.lat / 10_000_000_i32;
+        let lat_frac = (state.lat.abs() % 10_000_000) / 10; // 6 digits
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:4}.{:06}  ", lat_deg, lat_frac));
+        let _ = Text::new(&buf, Point::new(26, 54), gps_style).draw(d);
 
-        let label_style = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
-        // Opaque values for attitude (white on bg)
-        // Re-use val_style? Yes.
+        // LON
+        let lon_deg = state.lon / 10_000_000_i32;
+        let lon_frac = (state.lon.abs() % 10_000_000) / 10;
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:4}.{:06}  ", lon_deg, lon_frac));
+        let _ = Text::new(&buf, Point::new(26, 68), gps_style).draw(d);
 
-        for (i, (label, val)) in attitude_items.iter().enumerate() {
-            let x = 10 + (i as i32) * 75;
-            if draw_labels {
-                let _ = Text::new(label, Point::new(x, 115), label_style).draw(target);
-            }
-            buf.clear();
-            let _ = core::fmt::write(&mut buf, format_args!("{:.1}  ", val)); // Pad with spaces
-            let _ = Text::new(&buf, Point::new(x + 15, 115), value_style).draw(target);
+        // ALT
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:6.1}m  ", state.alt));
+        let _ = Text::new(&buf, Point::new(26, 82), val_w).draw(d);
+
+        // SATS
+        let sat_style = if state.satellites >= 6 { val_g }
+                        else if state.satellites >= 3 { val_y }
+                        else { val_r };
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:2}  ", state.satellites));
+        let _ = Text::new(&buf, Point::new(162, 82), sat_style).draw(d);
+
+        // ══════════════════════════════════════════════════════════════════════
+        // SECTION 2 — IMU / ATTITUDE  (y 94..123)
+        // ══════════════════════════════════════════════════════════════════════
+        if labels {
+            let _ = Text::new("[ IMU ]", Point::new(4, 97), acc_s).draw(d);
+            let _ = Text::new("P", Point::new(4, 115), lbl).draw(d);
+            let _ = Text::new("R", Point::new(82, 115), lbl).draw(d);
+            let _ = Text::new("Y", Point::new(160, 115), lbl).draw(d);
         }
+        // Pitch
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:+6.1}  ", state.gyro[0]));
+        let _ = Text::new(&buf, Point::new(14, 115), val_w).draw(d);
+        // Roll
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:+6.1}  ", state.gyro[1]));
+        let _ = Text::new(&buf, Point::new(92, 115), val_w).draw(d);
+        // Yaw
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:+6.1}  ", state.gyro[2]));
+        let _ = Text::new(&buf, Point::new(170, 115), val_w).draw(d);
 
-        // === SENSORS ===
-        if draw_labels {
-            let _ = Text::new("[ SENSORS ]", Point::new(10, 135), header_style).draw(target);
+        // ══════════════════════════════════════════════════════════════════════
+        // SECTION 3 — BARO  (y 124..153)
+        // ══════════════════════════════════════════════════════════════════════
+        if labels {
+            let _ = Text::new("[ BARO ]", Point::new(4, 127), acc_s).draw(d);
+            let _ = Text::new("hPa", Point::new(4, 143), lbl).draw(d);
+            let _ = Text::new("Tmp", Point::new(122, 143), lbl).draw(d);
         }
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:7.1}  ", state.press));
+        let _ = Text::new(&buf, Point::new(28, 143), val_w).draw(d);
 
-        let sensor_items = [
-            ("Vario", format_args!("{:.1}m/s  ", state.vel), 150),
-            ("Batt ", format_args!("{}mV    ", state.batt_voltage), 165),
-            ("Sats ", format_args!("{}      ", state.satellites), 180),
-        ];
+        let temp_style = if state.temp > 60.0 { val_r } else if state.temp > 40.0 { val_y } else { val_w };
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:+5.1}C  ", state.temp));
+        let _ = Text::new(&buf, Point::new(146, 143), temp_style).draw(d);
 
-        for (label, val_fmt, y) in sensor_items.iter() {
-            if draw_labels {
-                let _ = Text::new(label, Point::new(10, *y), label_style).draw(target);
-            }
-            buf.clear();
-            let _ = core::fmt::write(&mut buf, *val_fmt);
-            let _ = Text::new(&buf, Point::new(70, *y), value_style).draw(target);
+        // ══════════════════════════════════════════════════════════════════════
+        // SECTION 4 — VARIO  (y 154..173)
+        // ══════════════════════════════════════════════════════════════════════
+        if labels {
+            let _ = Text::new("[ VARIO ]", Point::new(4, 157), acc_s).draw(d);
+            let _ = Text::new("m/s", Point::new(100, 173), lbl).draw(d);
         }
+        let vario_style = if state.vel > 2.0 { val_g } else if state.vel < -3.0 { val_r } else { val_c };
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:+7.2}  ", state.vel));
+        let _ = Text::new(&buf, Point::new(4, 173), vario_style).draw(d);
 
-        // === PACKET STATS ===
-        if draw_labels {
-            let _ = Text::new("[ PACKETS ]", Point::new(10, 205), header_style).draw(target);
+        // ══════════════════════════════════════════════════════════════════════
+        // SECTION 5 — BATTERY  (y 174..198)
+        // ══════════════════════════════════════════════════════════════════════
+        if labels {
+            let _ = Text::new("[ BATT ]", Point::new(4, 177), acc_s).draw(d);
+            let _ = Text::new("mV", Point::new(82, 193), lbl).draw(d);
         }
+        // Batt color: >3.7V green, 3.5-3.7 yellow, <3.5 red
+        let batt_mv = state.batt_voltage;
+        let batt_style = if batt_mv > 3700 { val_g } else if batt_mv > 3500 { val_y } else { val_r };
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:5}  ", batt_mv));
+        let _ = Text::new(&buf, Point::new(4, 193), batt_style).draw(d);
+
+        // Armed flag
+        let arm_style = MonoTextStyleBuilder::new().font(&FONT_6X13)
+            .text_color(if armed { ERR_RED } else { DIM_WHITE })
+            .background_color(BG).build();
+        let _ = Text::new(if armed { "[ARMED]" } else { "[ safe]" }, Point::new(134, 193), arm_style).draw(d);
+
+        // ══════════════════════════════════════════════════════════════════════
+        // SECTION 6 — DEBUG COUNTERS  (y 199..237)
+        // ══════════════════════════════════════════════════════════════════════
+        if labels {
+            let _ = Text::new("[ DEBUG ]", Point::new(4, 202), acc_s).draw(d);
+            let _ = Text::new("PKT", Point::new(4, 215), lbl).draw(d);
+            let _ = Text::new("LS", Point::new(80, 215), lbl).draw(d);
+            let _ = Text::new("GPS", Point::new(138, 215), lbl).draw(d);
+            let _ = Text::new("TIM us", Point::new(4, 231), lbl).draw(d);
+            let _ = Text::new("INT us", Point::new(122, 231), lbl).draw(d);
+        }
+        // Counters row 1
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:5}  ", state.elrs_packet_count));
+        let _ = Text::new(&buf, Point::new(22, 215), val_d).draw(d);
 
         buf.clear();
-        let _ = core::fmt::write(
-            &mut buf,
-            format_args!(
-                "RX:{} LS:{} G:{} ",
-                state.elrs_packet_count, state.elrs_link_stats_count, state.elrs_gps_count
-            ),
-        );
-        let _ = Text::new(&buf, Point::new(10, 225), value_style).draw(target);
-    }
+        let _ = core::fmt::write(&mut buf, format_args!("{:4}  ", state.elrs_link_stats_count));
+        let _ = Text::new(&buf, Point::new(92, 215), val_d).draw(d);
 
-    /// Screen 2: ELRS Config - modifiable settings
-    fn draw_elrs_config(target: &mut DisplayType<'d>, menu: &MenuState) {
-        let mut buf = String::<32>::new();
-        let label_style = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
-        // let value_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE); // Unused
-        let accent = Self::get_theme_accent(menu.theme_idx);
-
-        let tlm_ratio_name = match menu.settings.tlm_ratio {
-            0 => "Off",
-            1 => "1:128",
-            2 => "1:64",
-            3 => "1:32",
-            4 => "1:16",
-            5 => "1:8",
-            6 => "1:4",
-            7 => "1:2",
-            _ => "?",
-        };
-
-        let rate_name = match menu.settings.packet_rate {
-            0 => "25Hz",
-            1 => "50Hz",
-            2 => "100Hz",
-            3 => "150Hz",
-            4 => "200Hz",
-            5 => "250Hz",
-            6 => "500Hz",
-            _ => "?",
-        };
-
-        let items: [(&str, &str); 3] = [
-            ("TLM Ratio", tlm_ratio_name),
-            ("Packet Rate", rate_name),
-            ("TX Power", ""),
-        ];
-
-        for (i, (label, preset)) in items.iter().enumerate() {
-            let y = 55 + (i as i32) * 55;
-            let is_selected = menu.is_active && menu.selected_item == i as u8;
-
-            // Background
-            let bg = if is_selected { SELECTED_BG } else { BG_COLOR };
-            let _ = Rectangle::new(Point::new(0, y - 15), Size::new(240, 50))
-                .into_styled(PrimitiveStyle::with_fill(bg))
-                .draw(target);
-
-            // Label
-            let _ = Text::new(label, Point::new(15, y), label_style).draw(target);
-
-            // Value (big)
-            buf.clear();
-            if i == 2 {
-                let _ = core::fmt::write(&mut buf, format_args!("{}%", menu.settings.tx_power));
-            } else {
-                let _ = core::fmt::write(&mut buf, format_args!("{}", preset));
-            }
-
-            let val_color = if is_selected { accent } else { Rgb565::WHITE };
-            let val_style = MonoTextStyle::new(&FONT_10X20, val_color);
-            let _ = Text::new(&buf, Point::new(15, y + 25), val_style).draw(target);
-
-            // Selection indicator
-            if is_selected {
-                let _ = Text::new(
-                    ">",
-                    Point::new(5, y + 25),
-                    MonoTextStyle::new(&FONT_10X20, accent),
-                )
-                .draw(target);
-            }
-        }
-
-        // Config dirty indicator
-        if menu.settings.elrs_config_dirty {
-            let dirty_style = MonoTextStyle::new(&FONT_6X10, WARN_YELLOW);
-            let _ = Text::new("* SENDING CONFIG *", Point::new(55, 235), dirty_style).draw(target);
-        }
-    }
-
-    /// Screen 3: Settings - local device settings
-    fn draw_settings(target: &mut DisplayType<'d>, menu: &MenuState) {
-        let mut buf = String::<32>::new();
-        let label_style = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
-        let value_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
-        let accent = Self::get_theme_accent(menu.theme_idx);
-
-        let theme_name = match menu.theme_idx {
-            0 => "Cyan",
-            1 => "Orange",
-            2 => "Matrix",
-            3 => "Purple",
-            _ => "?",
-        };
-
-        // Theme setting (modifiable)
-        let y = 60;
-        let is_selected = menu.is_active && menu.selected_item == 0;
-        let bg = if is_selected { SELECTED_BG } else { BG_COLOR };
-
-        let _ = Rectangle::new(Point::new(0, y - 15), Size::new(240, 50))
-            .into_styled(PrimitiveStyle::with_fill(bg))
-            .draw(target);
-
-        let _ = Text::new("Theme", Point::new(15, y), label_style).draw(target);
-
-        let val_color = if is_selected { accent } else { Rgb565::WHITE };
-        let val_style = MonoTextStyle::new(&FONT_10X20, val_color);
-        let _ = Text::new(theme_name, Point::new(15, y + 25), val_style).draw(target);
-
-        if is_selected {
-            let _ = Text::new(
-                ">",
-                Point::new(5, y + 25),
-                MonoTextStyle::new(&FONT_10X20, accent),
-            )
-            .draw(target);
-        }
-
-        // Uptime (read-only)
-        let y2 = 130;
-        let _ = Rectangle::new(Point::new(0, y2 - 15), Size::new(240, 50))
-            .into_styled(PrimitiveStyle::with_fill(BG_COLOR))
-            .draw(target);
-
-        let _ = Text::new("Uptime", Point::new(15, y2), label_style).draw(target);
         buf.clear();
-        let _ = core::fmt::write(&mut buf, format_args!("{}s", menu.uptime_secs));
-        let _ = Text::new(&buf, Point::new(15, y2 + 25), value_style).draw(target);
+        let _ = core::fmt::write(&mut buf, format_args!("{:4}  ", state.elrs_gps_count));
+        let _ = Text::new(&buf, Point::new(157, 215), val_d).draw(d);
 
-        // Version info
-        let ver_style = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
-        let _ = Text::new("Ground Station v2.0", Point::new(50, 200), ver_style).draw(target);
-        let _ = Text::new("ESP32-S3 + ELRS", Point::new(60, 215), ver_style).draw(target);
+        // RadioId timing row 2
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:6}  ", state.elrs_last_radio_id.timing_offset_us));
+        let _ = Text::new(&buf, Point::new(40, 231), val_d).draw(d);
+
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:6}  ", state.elrs_last_radio_id.interval_us));
+        let _ = Text::new(&buf, Point::new(158, 231), val_d).draw(d);
+
+        // ══════════════════════════════════════════════════════════════════════
+        // SECTION 7 — FOOTER  (y 238..279)
+        // ══════════════════════════════════════════════════════════════════════
+        if labels {
+            let _ = Rectangle::new(Point::new(0, 238), Size::new(240, 42))
+                .into_styled(PrimitiveStyle::with_fill(FTR_BG)).draw(d);
+            let _ = Text::new("UP:", Point::new(4, 252), MonoTextStyle::new(&FONT_6X10, LBL_GRAY)).draw(d);
+            let _ = Text::new("OTH:", Point::new(100, 252), MonoTextStyle::new(&FONT_6X10, LBL_GRAY)).draw(d);
+        }
+
+        // Uptime
+        let ftr_val = MonoTextStyleBuilder::new()
+            .font(&FONT_6X10).text_color(DIM_WHITE).background_color(FTR_BG).build();
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:5}s  ", uptime));
+        let _ = Text::new(&buf, Point::new(20, 252), ftr_val).draw(d);
+
+        // Other packet counter
+        buf.clear();
+        let _ = core::fmt::write(&mut buf, format_args!("{:4}  ", state.elrs_other_count));
+        let _ = Text::new(&buf, Point::new(124, 252), ftr_val).draw(d);
+
+        // Config dirty flag
+        let cfg_style = MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(if cfg_dirty { WARN_YLW } else { FTR_BG })
+            .background_color(FTR_BG).build();
+        let _ = Text::new("*CFG*", Point::new(178, 252), cfg_style).draw(d);
+
+        // Version line
+        let ver_style = MonoTextStyleBuilder::new()
+            .font(&FONT_6X10).text_color(LBL_GRAY).background_color(FTR_BG).build();
+        let _ = Text::new("Ground Station v3 | ESP32-S3", Point::new(4, 268), ver_style).draw(d);
     }
 }

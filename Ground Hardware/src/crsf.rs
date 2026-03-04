@@ -213,9 +213,9 @@ impl RadioId {
 
 pub fn build_channels_packet(channels: &[u16; 16]) -> Vec<u8, 64> {
     let mut buf = Vec::new();
-    // Sync
-    buf.push(0xC8).ok(); // Sync byte for RC channels
-                         // Len: 22 bytes payload + 1 type + 1 crc = 24
+    // Sync byte 0xC8 for standard CRSF frames (RC channels)
+    buf.push(CRSF_SYNC_BYTE).ok();
+    // Len: 22 bytes payload + 1 type + 1 crc = 24
     buf.push(24).ok();
     // Type
     buf.push(0x16).ok(); // RcChannelsPacked
@@ -368,10 +368,10 @@ pub fn payload_vario(alt: f32, vspeed: f32) -> Vec<u8, 64> {
     let mut buf = Vec::new();
     buf.push(CRSF_FRAMETYPE_VARIO).ok();
 
-    // Payload: Altitude (dm), Vertical Speed (cm/s)
+    // Payload: Altitude (dm), Vertical Speed (m/s)
     // Altitude in dm (decimeters)
     let alt_dm = (alt * 10.0) as u16;
-    let vspd_cms = (vspeed * 100.0) as i16;
+    let vspd_cms = (vspeed * 100.0) as i16; // cm/s
 
     buf.extend_from_slice(&alt_dm.to_be_bytes()).ok();
     buf.extend_from_slice(&vspd_cms.to_be_bytes()).ok();
@@ -444,7 +444,7 @@ pub fn build_device_ping(destination: u8) -> Vec<u8, 64> {
     // [Sync] [FrameLen] [Type] [Dest] [Origin] [CRC]
     // Frame length = Type(1) + Dest(1) + Origin(1) + CRC(1) = 4
 
-    frame.push(CRSF_SYNC_BYTE).ok();
+    frame.push(CRSF_ADDRESS_TX).ok(); // Address: TX module
     frame.push(4).ok(); // Frame length
     frame.push(CRSF_FRAMETYPE_DEVICE_PING).ok();
     frame.push(destination).ok();
@@ -466,7 +466,7 @@ pub fn build_parameter_read(param_number: u8, chunk: u8) -> Vec<u8, 64> {
     // [Sync] [FrameLen] [Type] [Dest] [Origin] [ParamNum] [Chunk] [CRC]
     // Frame length = Type(1) + Dest(1) + Origin(1) + Payload(2) + CRC(1) = 6
 
-    frame.push(CRSF_SYNC_BYTE).ok();
+    frame.push(CRSF_ADDRESS_TX).ok(); // Address: TX module
     frame.push(6).ok();
     frame.push(CRSF_FRAMETYPE_PARAMETER_READ).ok();
     frame.push(CRSF_ADDRESS_TX).ok(); // Send to TX module
@@ -493,7 +493,7 @@ pub fn build_parameter_write(param_number: u8, value: u8) -> Vec<u8, 64> {
     // [Sync] [FrameLen] [Type] [Dest] [Origin] [ParamNum] [Value] [CRC]
     // Frame length = Type(1) + Dest(1) + Origin(1) + ParamNum(1) + Value(1) + CRC(1) = 6
 
-    frame.push(CRSF_SYNC_BYTE).ok();
+    frame.push(CRSF_ADDRESS_TX).ok(); // Address: TX module
     frame.push(6).ok();
     frame.push(CRSF_FRAMETYPE_PARAMETER_WRITE).ok();
     frame.push(CRSF_ADDRESS_TX).ok(); // Send to TX module
@@ -510,19 +510,19 @@ pub fn build_parameter_write(param_number: u8, value: u8) -> Vec<u8, 64> {
 /// Build ELRS-specific configuration sequence
 /// Returns a vector of frames to send in sequence
 ///
-/// ELRS parameter numbers (may vary by firmware version):
-/// Check your ELRS Lua script for exact numbers
-/// Typically found in the ELRS source: src/lua/elrsV3.lua
+/// ELRS 3.x parameter numbers (may vary by firmware version):
+/// 1=Packet Rate, 2=Telem Ratio, 3=Switch Mode, 4=Antenna Mode,
+/// 5=TX Power (folder), 6=Max Power, 7=Dynamic
 pub fn build_elrs_config_sequence(rate_idx: u8, tlm_idx: u8, power_idx: u8) -> [Vec<u8, 64>; 4] {
     [
         // 1. Ping TX module first
         build_device_ping(CRSF_ADDRESS_TX),
-        // 2. Write packet rate (typically param 1 in ELRS)
+        // 2. Write packet rate (param 1 in ELRS)
         build_parameter_write(1, rate_idx),
-        // 3. Write telemetry ratio (typically param 2 in ELRS)
+        // 3. Write telemetry ratio (param 2 in ELRS)
         build_parameter_write(2, tlm_idx),
-        // 4. Write power (typically param 3 in ELRS)
-        build_parameter_write(3, power_idx),
+        // 4. Write power (param 6 = Max Power in ELRS 3.x)
+        build_parameter_write(6, power_idx),
     ]
 }
 
@@ -536,7 +536,230 @@ pub fn build_elrs_tlm_ratio(tlm_idx: u8) -> Vec<u8, 64> {
     build_parameter_write(2, tlm_idx)
 }
 
-/// Helper: Build single config frame for TX power
+/// Helper: Build single config frame for TX power (Max Power = param 6)
 pub fn build_elrs_tx_power(power_idx: u8) -> Vec<u8, 64> {
-    build_parameter_write(3, power_idx)
+    build_parameter_write(6, power_idx)
+}
+
+// ============================================================================
+// ELRS Parameter Discovery
+// Reads parameters from the ELRS TX module to discover available power levels,
+// packet rates, and telemetry ratios dynamically.
+// ============================================================================
+
+/// CRSF Parameter data types
+pub const CRSF_PARAM_TYPE_UINT8: u8 = 0;
+pub const CRSF_PARAM_TYPE_INT8: u8 = 1;
+pub const CRSF_PARAM_TYPE_UINT16: u8 = 2;
+pub const CRSF_PARAM_TYPE_INT16: u8 = 3;
+pub const CRSF_PARAM_TYPE_TEXT_SELECTION: u8 = 9;
+pub const CRSF_PARAM_TYPE_STRING: u8 = 10;
+pub const CRSF_PARAM_TYPE_FOLDER: u8 = 11;
+pub const CRSF_PARAM_TYPE_INFO: u8 = 12;
+pub const CRSF_PARAM_TYPE_COMMAND: u8 = 13;
+
+/// Discovered ELRS module configuration
+/// Populated via CRSF parameter discovery at boot.
+/// All fields are primitives so this is Copy-safe for use in Mutex<RefCell<>>.
+#[derive(Clone, Copy)]
+pub struct ElrsConfig {
+    pub device_found: bool,
+    pub discovery_done: bool,
+    pub total_params: u8,
+    // Power
+    pub power_param_num: u8,           // CRSF param number for Max Power
+    pub power_levels_mw: [u16; 12],    // mW values for each index
+    pub power_count: u8,               // number of available power levels
+    pub power_current_idx: u8,         // current power index reported by module
+    // Rate
+    pub rate_param_num: u8,
+    pub rate_count: u8,
+    pub rate_current_idx: u8,
+    // TLM
+    pub tlm_param_num: u8,
+    pub tlm_count: u8,
+    pub tlm_current_idx: u8,
+}
+
+impl Default for ElrsConfig {
+    fn default() -> Self {
+        Self {
+            device_found: false,
+            discovery_done: false,
+            total_params: 0,
+            power_param_num: 0,
+            power_levels_mw: [0; 12],
+            power_count: 0,
+            power_current_idx: 0,
+            rate_param_num: 0,
+            rate_count: 0,
+            rate_current_idx: 0,
+            tlm_param_num: 0,
+            tlm_count: 0,
+            tlm_current_idx: 0,
+        }
+    }
+}
+
+/// Parse DeviceInfo (0x29) response to extract field count
+/// Payload (after type byte): [Dest] [Origin] [DeviceName\0] [Serial(4)] [HW(4)] [SW(4)] [FieldCount] [ParamVer]
+/// Returns field_count or None
+pub fn parse_device_info(payload: &[u8]) -> Option<u8> {
+    if payload.len() < 4 {
+        return None;
+    }
+    // Device name starts at [2], null-terminated
+    let name_end = payload[2..].iter().position(|&b| b == 0)?;
+    let after_name = 2 + name_end + 1;
+    // Skip serial(4) + hw_ver(4) + sw_ver(4) = 12 bytes
+    let field_count_idx = after_name + 12;
+    if field_count_idx < payload.len() {
+        Some(payload[field_count_idx])
+    } else {
+        None
+    }
+}
+
+/// Parsed result from a ParameterSettingsEntry (0x2B) frame
+pub struct ParsedParam {
+    pub param_num: u8,
+    pub parent: u8,
+    pub data_type: u8,
+    pub value: u8,
+    pub max: u8,
+    pub is_power: bool,         // name contains "Power" (not "Dynamic")
+    pub is_rate: bool,          // name contains "Rate" or "Packet"
+    pub is_tlm: bool,           // name contains "Telem" or "TLM"
+    pub has_mw: bool,           // options contain "mW" or "W"
+    pub power_levels: [u16; 12],
+    pub power_count: u8,
+    pub option_count: u8,
+}
+
+/// Parse a ParameterSettingsEntry (0x2B) payload
+/// Payload: [Dest] [Origin] [ParamNum] [ChunkIdx] [Parent] [DataType] [Name\0] [data...]
+/// For TEXT_SELECTION: [Options\0] [Value] [Min] [Max] [Default]
+pub fn parse_parameter_entry(payload: &[u8]) -> Option<ParsedParam> {
+    if payload.len() < 7 {
+        return None;
+    }
+
+    let param_num = payload[2];
+    let chunk_idx = payload[3];
+    let parent = payload[4];
+    let data_type = payload[5] & 0x7F; // mask out hidden bit
+
+    // Only handle chunk 0 (first/only chunk)
+    if chunk_idx != 0 {
+        return None;
+    }
+
+    // Parse name (null-terminated at index 6+)
+    let name_start = 6;
+    let name_end_rel = payload[name_start..].iter().position(|&b| b == 0)?;
+    let name_bytes = &payload[name_start..name_start + name_end_rel];
+
+    // Identify parameter by name
+    let mut is_power = false;
+    let mut is_rate = false;
+    let mut is_tlm = false;
+
+    if let Ok(name_str) = core::str::from_utf8(name_bytes) {
+        // "Max Power" or "Power" but not "Dynamic Power"
+        if (name_str.contains("Power") || name_str.contains("power"))
+            && !name_str.contains("Dynamic")
+            && !name_str.contains("dynamic")
+        {
+            is_power = true;
+        }
+        if name_str.contains("Rate") || name_str.contains("rate") || name_str.contains("Packet") {
+            is_rate = true;
+        }
+        if name_str.contains("Telem") || name_str.contains("telem") || name_str.contains("TLM") {
+            is_tlm = true;
+        }
+    }
+
+    let after_name = name_start + name_end_rel + 1;
+
+    let mut result = ParsedParam {
+        param_num,
+        parent,
+        data_type,
+        value: 0,
+        max: 0,
+        is_power,
+        is_rate,
+        is_tlm,
+        has_mw: false,
+        power_levels: [0; 12],
+        power_count: 0,
+        option_count: 0,
+    };
+
+    // Parse TEXT_SELECTION type
+    if data_type == CRSF_PARAM_TYPE_TEXT_SELECTION && after_name < payload.len() {
+        if let Some(opts_end_rel) = payload[after_name..].iter().position(|&b| b == 0) {
+            let opts_bytes = &payload[after_name..after_name + opts_end_rel];
+            if let Ok(opts_str) = core::str::from_utf8(opts_bytes) {
+                result.has_mw = opts_str.contains("mW") || opts_str.contains(" W");
+
+                // Count options and parse mW values
+                let mut count: u8 = 0;
+                for opt in opts_str.split(';') {
+                    if count < 12 {
+                        if result.has_mw {
+                            if let Some(val) = parse_mw_value(opt) {
+                                result.power_levels[count as usize] = val;
+                                result.power_count = count + 1;
+                            }
+                        }
+                        count += 1;
+                    }
+                }
+                result.option_count = count;
+            }
+
+            // Value, Min, Max, Default after options\0
+            let val_start = after_name + opts_end_rel + 1;
+            if val_start < payload.len() {
+                result.value = payload[val_start];
+            }
+            if val_start + 2 < payload.len() {
+                result.max = payload[val_start + 2];
+            }
+        }
+    }
+
+    Some(result)
+}
+
+/// Parse a milliwatt value from an option string like "10 mW", "100mW", "1 W", "2000 mW"
+fn parse_mw_value(s: &str) -> Option<u16> {
+    let s = s.trim();
+    let bytes = s.as_bytes();
+
+    // Extract leading digits
+    let mut num: u16 = 0;
+    let mut found_digit = false;
+
+    for &b in bytes {
+        if b >= b'0' && b <= b'9' {
+            found_digit = true;
+            num = num.checked_mul(10)?.checked_add((b - b'0') as u16)?;
+        } else if found_digit {
+            break; // stop at first non-digit after digits
+        }
+    }
+
+    if !found_digit {
+        return None;
+    }
+
+    // If it says "W" but NOT "mW", value is in Watts → convert to mW
+    if s.contains('W') && !s.contains("mW") {
+        num = num.checked_mul(1000)?;
+    }
+
+    Some(num)
 }
